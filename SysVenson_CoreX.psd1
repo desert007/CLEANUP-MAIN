@@ -31,7 +31,7 @@ try {
     }
     Write-Host "[SUCCESS] Running as Administrator." -ForegroundColor Green
 
-    # --- C# লোডার কম্পাইল ---
+    # --- C# লোডার কম্পাইল (আগের মতই) ---
     Write-Host "[2] Compiling C# Remote Loader..." -ForegroundColor Yellow
     $kernel = @'
 using System;
@@ -352,26 +352,70 @@ public static class RemoteLoader
         return
     }
 
-    # --- টার্গেট প্রক্রিয়া খোঁজা (WMI ব্যবহার) ---
+    # ============================================================
+    #  ★★★ প্রক্রিয়া খোঁজার নতুন পদ্ধতি (Get-Process + fallback) ★★★
+    # ============================================================
     Write-Host "[3] Searching for Cloudflare process..." -ForegroundColor Yellow
 
-    # WMI দিয়ে ক্লাউডফ্লেয়ার সম্পর্কিত সব প্রক্রিয়া খুঁজি
-    $processes = Get-CimInstance -ClassName Win32_Process -Filter "Name LIKE '%cloudflare%'" -ErrorAction SilentlyContinue
-    if (-not $processes) {
-        # CIM না চললে WMI试试
-        $processes = Get-WmiObject -Class Win32_Process -Filter "Name LIKE '%cloudflare%'" -ErrorAction SilentlyContinue
+    $proc = $null
+    # সম্ভাব্য নামগুলোর তালিকা
+    $possibleNames = @("CloudflareWARP", "Cloudflare WARP", "CloudflareOneClient", "Cloudflare One Client", "WARP", "Cloudflare*")
+    foreach ($name in $possibleNames) {
+        try {
+            $proc = Get-Process -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($proc) {
+                Write-Host "[SUCCESS] Found process using name pattern: $name" -ForegroundColor Green
+                break
+            }
+        } catch {
+            # কোনো নাম কাজ না করলে চুপ থাকো
+        }
     }
 
-    if (-not $processes -or $processes.Count -eq 0) {
-        Write-Host "[ERROR] No Cloudflare process found. Please ensure Cloudflare is running." -ForegroundColor Red
+    # যদি Get-Process দিয়ে না পাই, তাহলে tasklist ব্যবহার করি
+    if (-not $proc) {
+        Write-Host "[INFO] Get-Process didn't find it, trying tasklist..." -ForegroundColor Yellow
+        try {
+            $tasklist = tasklist /FO CSV /NH | ConvertFrom-Csv -Header "ImageName","PID","SessionName","Session#","MemUsage"
+            $cloudflareTasks = $tasklist | Where-Object { $_.ImageName -like "*cloudflare*" -or $_.ImageName -like "*warp*" }
+            if ($cloudflareTasks) {
+                $first = $cloudflareTasks[0]
+                $pid = [int]$first.PID
+                $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+                if ($proc) {
+                    Write-Host "[SUCCESS] Found process via tasklist: $($proc.Name) (PID: $pid)" -ForegroundColor Green
+                }
+            }
+        } catch {
+            Write-Host "[WARN] tasklist fallback also failed." -ForegroundColor Yellow
+        }
+    }
+
+    # শেষ চেষ্টা: manually সব প্রক্রিয়া ঘেঁটে দেখি
+    if (-not $proc) {
+        Write-Host "[INFO] Trying to scan all processes by name..." -ForegroundColor Yellow
+        try {
+            $allProcs = Get-Process
+            foreach ($p in $allProcs) {
+                if ($p.ProcessName -like "*cloudflare*" -or $p.ProcessName -like "*warp*") {
+                    $proc = $p
+                    Write-Host "[SUCCESS] Found process by scanning: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Green
+                    break
+                }
+            }
+        } catch {
+            # শেষ চেষ্টা ব্যর্থ
+        }
+    }
+
+    if (-not $proc) {
+        Write-Host "[ERROR] Could not find any Cloudflare/WARP process. Please ensure it's running." -ForegroundColor Red
         return
     }
 
-    # প্রথম প্রক্রিয়াটি নিই (বা আপনি যেটা চান সেটা বাছাই করতে পারেন)
-    $proc = $processes[0]
-    $procId = $proc.ProcessId
+    $procId = $proc.Id
     $procName = $proc.Name
-    Write-Host "[SUCCESS] Found process: $procName (PID: $procId)" -ForegroundColor Green
+    Write-Host "[INFO] Target process: $procName (PID: $procId)" -ForegroundColor Cyan
 
     # --- প্রক্রিয়া হ্যান্ডেল খোলা ---
     Write-Host "[4] Opening process handle with FULL access..." -ForegroundColor Yellow
