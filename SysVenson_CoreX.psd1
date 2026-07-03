@@ -30,24 +30,25 @@ if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsId
 }
 
 # ============================================================
-# ★★★ 1. Console Hide (we keep visible in debug mode) ★★★
+# ★★★ 1. Console Hide (SKIP in debug mode) ★★★
 # ============================================================
-Write-DebugInfo "Attempting to hide console window..." -Color "Yellow"
-try {
-    Add-Type -Name Window -Namespace Console -MemberDefinition @'
+if ($DebugMode) {
+    Write-DebugInfo "Console will stay visible (debug mode)." -Color "Yellow"
+} else {
+    Write-DebugInfo "Attempting to hide console window..." -Color "Yellow"
+    try {
+        Add-Type -Name Window -Namespace Console -MemberDefinition @'
 [DllImport("Kernel32.dll")]
 public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")]
 public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
 '@ -ErrorAction Stop
-    $consoleHandle = [Console.Window]::GetConsoleWindow()
-    if ($DebugMode) {
-        Write-DebugInfo "Console not hidden (debug mode)." -Color "Yellow"
-    } else {
+        $consoleHandle = [Console.Window]::GetConsoleWindow()
         [Console.Window]::ShowWindow($consoleHandle, 0)
+        Write-DebugInfo "✅ Console hidden." -Color "Green"
+    } catch {
+        Write-DebugInfo "⚠️ Failed to hide console: $_" -Color "Red"
     }
-} catch {
-    Write-DebugInfo "⚠️ Failed to hide console: $_" -Color "Red"
 }
 
 # ============================================================
@@ -355,6 +356,8 @@ Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.Creation
 Write-DebugInfo "✅ Cleanup complete." -Color "Green"
 
 # ============================================================
-# ★★★ END ★★★
+# ★★★ END — KEEP CONSOLE OPEN ★★★
 # ============================================================
-Write-DebugInfo "Script finished. Exiting in 5 seconds..." -Color "Magenta"
+Write-DebugInfo "Script finished. Press ENTER to close this window." -Color "Magenta"
+Read-Host
+# Now the script will exit when user presses Enter.
