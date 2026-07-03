@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact="High")]
+CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact="High")]
 param()
 
 Set-StrictMode -Version Latest
