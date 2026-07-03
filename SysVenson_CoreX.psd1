@@ -31,7 +31,7 @@ try {
     }
     Write-Host "[SUCCESS] Running as Administrator." -ForegroundColor Green
 
-    # --- C# লোডার কম্পাইল (আগের মতই) ---
+    # --- C# লোডার কম্পাইল (শুধু একবার) ---
     Write-Host "[2] Compiling C# Remote Loader..." -ForegroundColor Yellow
     $kernel = @'
 using System;
@@ -352,70 +352,50 @@ public static class RemoteLoader
         return
     }
 
-    # ============================================================
-    #  ★★★ প্রক্রিয়া খোঁজার নতুন পদ্ধতি (Get-Process + fallback) ★★★
-    # ============================================================
-    Write-Host "[3] Searching for Cloudflare process..." -ForegroundColor Yellow
+    # --- টার্গেট প্রক্রিয়া খোঁজা (Get-Process + wildcard) ---
+    Write-Host "[3] Searching for Cloudflare/WARP process..." -ForegroundColor Yellow
 
+    # প্রথমে Get-Process দিয়ে চেষ্টা করি (wildcard সহ)
     $proc = $null
-    # সম্ভাব্য নামগুলোর তালিকা
-    $possibleNames = @("CloudflareWARP", "Cloudflare WARP", "CloudflareOneClient", "Cloudflare One Client", "WARP", "Cloudflare*")
-    foreach ($name in $possibleNames) {
+    try {
+        $proc = Get-Process -Name "*cloudflare*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $proc) {
+            $proc = Get-Process -Name "*warp*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+    } catch {
+        # Get-Process কাজ না করলে WMI ব্যবহার করি
+        Write-Host "[INFO] Get-Process failed, trying WMI..." -ForegroundColor Yellow
         try {
-            $proc = Get-Process -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($proc) {
-                Write-Host "[SUCCESS] Found process using name pattern: $name" -ForegroundColor Green
-                break
+            $wmiProc = Get-WmiObject -Class Win32_Process -Filter "Name LIKE '%cloudflare%' OR Name LIKE '%warp%'" -ErrorAction SilentlyContinue
+            if ($wmiProc) {
+                $procId = $wmiProc[0].ProcessId
+                $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
             }
         } catch {
-            # কোনো নাম কাজ না করলে চুপ থাকো
-        }
-    }
-
-    # যদি Get-Process দিয়ে না পাই, তাহলে tasklist ব্যবহার করি
-    if (-not $proc) {
-        Write-Host "[INFO] Get-Process didn't find it, trying tasklist..." -ForegroundColor Yellow
-        try {
-            $tasklist = tasklist /FO CSV /NH | ConvertFrom-Csv -Header "ImageName","PID","SessionName","Session#","MemUsage"
-            $cloudflareTasks = $tasklist | Where-Object { $_.ImageName -like "*cloudflare*" -or $_.ImageName -like "*warp*" }
-            if ($cloudflareTasks) {
-                $first = $cloudflareTasks[0]
-                $pid = [int]$first.PID
-                $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
-                if ($proc) {
-                    Write-Host "[SUCCESS] Found process via tasklist: $($proc.Name) (PID: $pid)" -ForegroundColor Green
+            # WMI না চললে tasklist ব্যবহার করি
+            Write-Host "[INFO] WMI failed, trying tasklist..." -ForegroundColor Yellow
+            $tasklist = tasklist /FO CSV /NH 2>$null
+            $lines = $tasklist -split "`r`n" | Where-Object { $_ -match '(?i)cloudflare|warp' }
+            if ($lines) {
+                $parts = $lines[0] -split '","'
+                $procName = $parts[0].Trim('"')
+                $procId = $parts[1] -as [int]
+                if ($procId) {
+                    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
                 }
             }
-        } catch {
-            Write-Host "[WARN] tasklist fallback also failed." -ForegroundColor Yellow
-        }
-    }
-
-    # শেষ চেষ্টা: manually সব প্রক্রিয়া ঘেঁটে দেখি
-    if (-not $proc) {
-        Write-Host "[INFO] Trying to scan all processes by name..." -ForegroundColor Yellow
-        try {
-            $allProcs = Get-Process
-            foreach ($p in $allProcs) {
-                if ($p.ProcessName -like "*cloudflare*" -or $p.ProcessName -like "*warp*") {
-                    $proc = $p
-                    Write-Host "[SUCCESS] Found process by scanning: $($proc.Name) (PID: $($proc.Id))" -ForegroundColor Green
-                    break
-                }
-            }
-        } catch {
-            # শেষ চেষ্টা ব্যর্থ
         }
     }
 
     if (-not $proc) {
         Write-Host "[ERROR] Could not find any Cloudflare/WARP process. Please ensure it's running." -ForegroundColor Red
+        Write-Host "[DEBUG] Try running: Get-Process -Name *cloudflare* in another PowerShell to verify." -ForegroundColor Yellow
         return
     }
 
     $procId = $proc.Id
-    $procName = $proc.Name
-    Write-Host "[INFO] Target process: $procName (PID: $procId)" -ForegroundColor Cyan
+    $procName = $proc.ProcessName
+    Write-Host "[SUCCESS] Found process: $procName (PID: $procId)" -ForegroundColor Green
 
     # --- প্রক্রিয়া হ্যান্ডেল খোলা ---
     Write-Host "[4] Opening process handle with FULL access..." -ForegroundColor Yellow
