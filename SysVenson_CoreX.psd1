@@ -16,11 +16,7 @@ $MaximumHistoryCount    = 0
 *> $null
 $Error.Clear()
 
-# ============================================================
-#  ★★★ পুরো স্ক্রিপ্ট TRY/CATCH/FINALLY দিয়ে র্যাপ করা ★★★
-# ============================================================
 try {
-
     Write-Host "==========================================" -ForegroundColor Cyan
     Write-Host "   SysVenson CoreX Injector (Debug Mode)  " -ForegroundColor Cyan
     Write-Host "==========================================" -ForegroundColor Cyan
@@ -43,7 +39,6 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Diagnostics;
 using System.ComponentModel;
-using System.Management;
 
 public class ManualMapResult
 {
@@ -91,17 +86,6 @@ public static class RemoteLoader
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
-
-    // WMI দিয়ে প্রক্রিয়া খোঁজার জন্য (যদি Get-Process কাজ না করে)
-    public static int GetProcessIdByName(string name) {
-        try {
-            var searcher = new ManagementObjectSearcher("SELECT ProcessId FROM Win32_Process WHERE Name = '" + name + ".exe'");
-            foreach (ManagementObject obj in searcher.Get()) {
-                return Convert.ToInt32(obj["ProcessId"]);
-            }
-        } catch { }
-        return 0;
-    }
 
     const uint MEM_COMMIT = 0x1000;
     const uint MEM_RESERVE = 0x2000;
@@ -368,18 +352,30 @@ public static class RemoteLoader
         return
     }
 
-    # --- টার্গেট প্রক্রিয়া খোঁজা (WMI দিয়ে) ---
-    Write-Host "[3] Searching for target process 'CloudflareWARP'..." -ForegroundColor Yellow
-    $pid = [RemoteLoader]::GetProcessIdByName("CloudflareWARP")
-    if ($pid -eq 0) {
-        Write-Host "[ERROR] Process 'CloudflareWARP.exe' not found!" -ForegroundColor Red
+    # --- টার্গেট প্রক্রিয়া খোঁজা (WMI ব্যবহার) ---
+    Write-Host "[3] Searching for Cloudflare process..." -ForegroundColor Yellow
+
+    # WMI দিয়ে ক্লাউডফ্লেয়ার সম্পর্কিত সব প্রক্রিয়া খুঁজি
+    $processes = Get-CimInstance -ClassName Win32_Process -Filter "Name LIKE '%cloudflare%'" -ErrorAction SilentlyContinue
+    if (-not $processes) {
+        # CIM না চললে WMI试试
+        $processes = Get-WmiObject -Class Win32_Process -Filter "Name LIKE '%cloudflare%'" -ErrorAction SilentlyContinue
+    }
+
+    if (-not $processes -or $processes.Count -eq 0) {
+        Write-Host "[ERROR] No Cloudflare process found. Please ensure Cloudflare is running." -ForegroundColor Red
         return
     }
-    Write-Host "[SUCCESS] Process found. PID: $pid" -ForegroundColor Green
+
+    # প্রথম প্রক্রিয়াটি নিই (বা আপনি যেটা চান সেটা বাছাই করতে পারেন)
+    $proc = $processes[0]
+    $procId = $proc.ProcessId
+    $procName = $proc.Name
+    Write-Host "[SUCCESS] Found process: $procName (PID: $procId)" -ForegroundColor Green
 
     # --- প্রক্রিয়া হ্যান্ডেল খোলা ---
     Write-Host "[4] Opening process handle with FULL access..." -ForegroundColor Yellow
-    $hProcess = [RemoteLoader]::OpenProcess(0x1F0FFF, $false, $pid)
+    $hProcess = [RemoteLoader]::OpenProcess(0x1F0FFF, $false, $procId)
     if ($hProcess -eq [IntPtr]::Zero) {
         Write-Host "[ERROR] Failed to open process handle. Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
         return
