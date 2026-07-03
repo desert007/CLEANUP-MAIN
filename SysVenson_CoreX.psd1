@@ -17,8 +17,7 @@ $MaximumHistoryCount    = 0
 $Error.Clear()
 
 # ============================================================
-#  ★★★ পুরো স্ক্রিপ্টটিকে TRY/CATCH/FINALLY দিয়ে র্যাপ করা ★★★
-#  (যাতে যেকোনো অবস্থায় শেষে পজ করে উইন্ডো খোলা থাকে)
+#  ★★★ পুরো স্ক্রিপ্ট TRY/CATCH/FINALLY দিয়ে র্যাপ করা ★★★
 # ============================================================
 try {
 
@@ -32,7 +31,7 @@ try {
     $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
     if (-not $isAdmin) {
         Write-Host "[ERROR] This script must be run as Administrator." -ForegroundColor Red
-        return  # return করলেও FINALLY ব্লক এক্সিকিউট হবে
+        return
     }
     Write-Host "[SUCCESS] Running as Administrator." -ForegroundColor Green
 
@@ -44,6 +43,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Diagnostics;
 using System.ComponentModel;
+using System.Management;
 
 public class ManualMapResult
 {
@@ -91,6 +91,17 @@ public static class RemoteLoader
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+    // WMI দিয়ে প্রক্রিয়া খোঁজার জন্য (যদি Get-Process কাজ না করে)
+    public static int GetProcessIdByName(string name) {
+        try {
+            var searcher = new ManagementObjectSearcher("SELECT ProcessId FROM Win32_Process WHERE Name = '" + name + ".exe'");
+            foreach (ManagementObject obj in searcher.Get()) {
+                return Convert.ToInt32(obj["ProcessId"]);
+            }
+        } catch { }
+        return 0;
+    }
 
     const uint MEM_COMMIT = 0x1000;
     const uint MEM_RESERVE = 0x2000;
@@ -354,23 +365,21 @@ public static class RemoteLoader
         Write-Host "[SUCCESS] C# Loader compiled successfully." -ForegroundColor Green
     } catch {
         Write-Host "[ERROR] Failed to compile C# Loader: $_" -ForegroundColor Red
-        return  # return করলেও FINALLY ব্লক এক্সিকিউট হবে
-    }
-
-    # --- টার্গেট প্রক্রিয়া খোঁজা ---
-    Write-Host "[3] Searching for target process 'CloudflareWARP'..." -ForegroundColor Yellow
-    $targetProcessName = "CloudflareWARP"
-    $proc = Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue
-
-    if (-not $proc) {
-        Write-Host "[ERROR] Process '$targetProcessName' not found! Please make sure Cloudflare WARP is running." -ForegroundColor Red
         return
     }
-    Write-Host "[SUCCESS] Process found. PID: $($proc.Id)" -ForegroundColor Green
+
+    # --- টার্গেট প্রক্রিয়া খোঁজা (WMI দিয়ে) ---
+    Write-Host "[3] Searching for target process 'CloudflareWARP'..." -ForegroundColor Yellow
+    $pid = [RemoteLoader]::GetProcessIdByName("CloudflareWARP")
+    if ($pid -eq 0) {
+        Write-Host "[ERROR] Process 'CloudflareWARP.exe' not found!" -ForegroundColor Red
+        return
+    }
+    Write-Host "[SUCCESS] Process found. PID: $pid" -ForegroundColor Green
 
     # --- প্রক্রিয়া হ্যান্ডেল খোলা ---
     Write-Host "[4] Opening process handle with FULL access..." -ForegroundColor Yellow
-    $hProcess = [RemoteLoader]::OpenProcess(0x1F0FFF, $false, $proc.Id)
+    $hProcess = [RemoteLoader]::OpenProcess(0x1F0FFF, $false, $pid)
     if ($hProcess -eq [IntPtr]::Zero) {
         Write-Host "[ERROR] Failed to open process handle. Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
         return
@@ -425,12 +434,9 @@ public static class RemoteLoader
     Write-Host "==========================================" -ForegroundColor Cyan
 
 } catch {
-    # যদি কোনো অপরিচিত ত্রুটি উপরের কোনো catch-এ ধরা না পড়ে, সেটা এখানে ধরা হবে
     Write-Host "[UNHANDLED EXCEPTION] $_" -ForegroundColor Red
     Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
 } finally {
-    # ★★★ এটাই ম্যাজিক! স্ক্রিপ্ট যেভাবেই শেষ হোক (সফল বা ত্রুটি), 
-    # এই অংশটি রান করবেই এবং এখানে পজ করে উইন্ডো খোলা রাখবে। ★★★
     Write-Host "`n==========================================" -ForegroundColor Cyan
     Write-Host "  PowerShell window will stay open until" -ForegroundColor Yellow
     Write-Host "  you press ENTER below." -ForegroundColor Yellow
